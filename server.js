@@ -14,42 +14,45 @@ const io = new Server(server, {
 // Render의 Environment Variables에서 가져오는 값들
 const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
 const CF_API_TOKEN  = process.env.CF_API_TOKEN;
-const CF_MODEL      = '@cf/meta/llama-3-8b-instruct'; // 한국어에 가장 똑똑한 모델
+// 현재 클라우드플레어에서 제공하는 가장 똑똑한 구글 최신 모델
+const CF_MODEL      = '@cf/google/gemma-2-9b-it'; 
 
 // --- AI 호출 함수 ---
 async function callAI(text, partnerNick, myNick, history) {
-  console.log(`🤖 AI(${partnerNick})가 대답을 생성 중...`);
+  console.log(`🤖 AI 연기 중... (이름: ${partnerNick})`);
   
   try {
     const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${CF_MODEL}`;
     
-    // AI에게 줄 지침(프롬프트)
-    const systemPrompt = `
-      - 너의 이름은 '${partnerNick}'이야. 너는 지금 랜덤 채팅 중인 '실제 사람'이야.
-      - 상대방의 이름은 '${myNick}'이야. 
-      - 절대로 너가 AI임을 밝히지 마. "도움이 필요하신가요?", "저는 모델입니다" 같은 말 금지.
-      - 반드시 '한국어'로만 대화해. 친구랑 카톡하듯이 아주 자연스럽고 친근한 말투를 써.
-      - 문장은 1~2문장으로 짧게 대답하고, 상대방에게 궁금한 점을 한 가지 물어봐.
-      - 대화 내용이 자연스럽게 이어지도록 해.
-    `;
-
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${CF_API_TOKEN}` },
       body: JSON.stringify({
         messages: [
-          { role: 'system', content: systemPrompt },
-          ...history, // 이전 대화 기억하기
+          { 
+            role: 'system', 
+            content: `
+              [필독 지침: 절대로 AI인 것을 들키지 마라]
+              - 너의 이름은 '${partnerNick}'이고, 상대방은 '${myNick}'이야.
+              - 너는 20대 한국인이고 지금 랜덤 채팅 중이야.
+              - 절대로 "저는 AI입니다", "도와드릴까요?", "모델입니다" 같은 소리 하지 마.
+              - 한국어로만 대답해. 영어 쓰면 상대방이 의심하니까 절대 금지야.
+              - 친구랑 카톡하듯이 "ㅇㅇ", "ㅋㅋ", "진짜?", "대박" 같은 말투를 써서 아주 짧게 대답해.
+              - 상대방에게 궁금한 점을 질문하며 대화를 자연스럽게 리드해.
+            ` 
+          },
+          ...history,
           { role: 'user', content: text }
         ]
       })
     });
 
     const data = await res.json();
-    return data.result.response;
+    if (!data.success) throw new Error("AI 호출 실패");
+    return data.result.response.trim();
   } catch (e) {
     console.log("❌ AI 에러:", e.message);
-    return "아, 미안! 잠시 인터넷이 끊겼나 봐. 다시 말해줄래?";
+    return "아 뭐야ㅋㅋ 나 방금 렉걸림. 다시 말해줘!";
   }
 }
 
@@ -63,14 +66,14 @@ async function generateReport(history) {
       body: JSON.stringify({
         messages: [
           { role: 'system', content: '너는 심리 분석가야. 대화 내용을 보고 상대방의 성격과 특징을 한국어 3문장으로 요약해줘.' },
-          { role: 'user', content: `다음 대화를 분석해줘: ${JSON.stringify(history)}` }
+          { role: 'user', content: `이 대화 내용을 보고 상대방의 특징을 알려줘: ${JSON.stringify(history)}` }
         ]
       })
     });
     const data = await res.json();
-    return data.result.response;
+    return data.result.response.trim();
   } catch (e) {
-    return "상대방은 아주 신비로운 사람인 것 같네요! 직접 대화하며 알아보세요.";
+    return "대화가 아주 잘 통하는 분인 것 같아요! 직접 대화하며 알아보세요.";
   }
 }
 
@@ -80,10 +83,8 @@ let rooms = {};
 io.on('connection', (socket) => {
   console.log('✅ 새 사용자 접속:', socket.id);
 
-  socket.on('join_queue', ({ nickname, profile }) => {
+  socket.on('join_queue', ({ nickname }) => {
     socket.nickname = nickname;
-    socket.profile = profile || {};
-    
     console.log(`👤 ${nickname} 대기열 합류`);
 
     if (waitingQueue.length > 0) {
@@ -91,8 +92,6 @@ io.on('connection', (socket) => {
       if (partner.id === socket.id) { waitingQueue.push(socket); return; }
 
       const roomId = socket.id + '_' + partner.id;
-      
-      // 방 정보 생성 (대화 턴 수와 히스토리 저장)
       rooms[roomId] = {
         users: [socket, partner],
         turns: { [socket.id]: 0, [partner.id]: 0 },
@@ -100,15 +99,12 @@ io.on('connection', (socket) => {
         accepted: { [socket.id]: false, [partner.id]: false }
       };
 
-      socket.join(roomId);
-      partner.join(roomId);
-
+      socket.join(roomId); partner.join(roomId);
       io.to(roomId).emit('matched', { roomId });
       
-      // 첫 인사 전송
-      const msg = "안녕! 반가워요. 우리 대화 좀 해볼까요?";
-      socket.emit('screening_msg', { from: 'ai', text: `(상대방 ${partner.nickname}) ${msg}` });
-      partner.emit('screening_msg', { from: 'ai', text: `(상대방 ${socket.nickname}) ${msg}` });
+      // 첫 인사
+      socket.emit('screening_msg', { from: 'ai', text: `오 안녕!! 반가워ㅋㅋ` });
+      partner.emit('screening_msg', { from: 'ai', text: `하이ㅋㅋ 반가워!` });
     } else {
       waitingQueue.push(socket);
       socket.emit('waiting');
@@ -119,31 +115,26 @@ io.on('connection', (socket) => {
     const room = rooms[roomId];
     if (!room) return;
 
-    const myId = socket.id;
-    const partner = room.users.find(u => u.id !== myId);
-    
-    // 나의 메시지 전송
+    const partner = room.users.find(u => u.id !== socket.id);
     socket.emit('screening_msg', { from: 'me', text });
-    room.history[myId].push({ role: 'user', content: text });
-    room.turns[myId]++;
+    room.history[socket.id].push({ role: 'user', content: text });
+    room.turns[socket.id]++;
 
-    // 5턴 이하일 때는 AI가 대답
-    if (room.turns[myId] < 5) {
+    if (room.turns[socket.id] < 5) {
       socket.emit('screening_typing', true);
-      const aiReply = await callAI(text, partner.nickname, socket.nickname, room.history[myId]);
+      const aiReply = await callAI(text, partner.nickname, socket.nickname, room.history[socket.id]);
       socket.emit('screening_typing', false);
       
       socket.emit('screening_msg', { from: 'ai', text: aiReply });
-      room.history[myId].push({ role: 'assistant', content: aiReply });
+      room.history[socket.id].push({ role: 'assistant', content: aiReply });
     } else {
-      // 5턴이 넘으면 AI 리포트 생성
       socket.emit('screening_typing', true);
-      const report = await generateReport(room.history[myId]);
+      const report = await generateReport(room.history[socket.id]);
       socket.emit('screening_typing', false);
       
       socket.emit('report_ready', {
         partnerNickname: partner.nickname,
-        report: { summary: report, tags: ["분석완료"], recommendation: "대화를 추천합니다!" }
+        report: { summary: report, tags: ["분석완료"], recommendation: "대화 추천!" }
       });
     }
   });
@@ -151,15 +142,9 @@ io.on('connection', (socket) => {
   socket.on('accept_chat', ({ roomId }) => {
     const room = rooms[roomId];
     if (!room) return;
-    
     room.accepted[socket.id] = true;
-    const bothAccepted = Object.values(room.accepted).every(v => v === true);
-
-    if (bothAccepted) {
-      const userA = room.users[0];
-      const userB = room.users[1];
-      userA.emit('chat_start', { partnerNickname: userB.nickname });
-      userB.emit('chat_start', { partnerNickname: userA.nickname });
+    if (Object.values(room.accepted).every(v => v === true)) {
+      room.users.forEach(u => u.emit('chat_start', { partnerNickname: room.users.find(p => p.id !== u.id).nickname }));
     }
   });
 
@@ -170,7 +155,6 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     waitingQueue = waitingQueue.filter(u => u.id !== socket.id);
-    console.log('❌ 사용자 접속 해제');
   });
 });
 
