@@ -5,69 +5,59 @@ const cors = require('cors');
 
 const app = express();
 app.use(cors());
+
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const io = new Server(server, {
+  cors: { origin: '*', methods: ['GET', 'POST'] }
+});
 
-// ── 환경변수 가져오기 (공백 제거 .trim() 추가) ──
-const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID ? process.env.CF_ACCOUNT_ID.trim() : null;
-const CF_API_TOKEN  = process.env.CF_API_TOKEN ? process.env.CF_API_TOKEN.trim() : null;
-const CF_MODEL      = '@cf/google/gemma-2-9b-it';
+// 환경변수 (Render에서 설정한 값)
+const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
+const CF_API_TOKEN  = process.env.CF_API_TOKEN;
+// 가장 기본적이고 잘 작동하는 젬마 모델 주소
+const CF_MODEL      = '@cf/google/gemma-7b-it-lora';
 
-// ── AI 호출 함수 ──
 async function callAI(messages) {
-  if (!CF_ACCOUNT_ID || !CF_API_TOKEN) {
-    return "Error: API 설정값이 없습니다.";
-  }
-
   try {
-    // API 주소를 아주 정확하게 생성
+    // 주소를 한 줄로 명확하게 작성하여 에러 방지
     const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${CF_MODEL}`;
     
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 
-        'Authorization': `Bearer ${CF_API_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Authorization': `Bearer ${CF_API_TOKEN}` },
       body: JSON.stringify({ messages })
     });
 
     const data = await res.json();
-
-    if (!data.success) {
-      // Cloudflare가 보낸 실제 에러 메시지를 화면에 표시
-      console.error("❌ 상세 에러:", data.errors);
-      return "Error: " + (data.errors[0]?.message || "API Rejected");
-    }
-
+    if (!data.success) return "Error: " + data.errors[0].message;
     return data.result.response.trim();
   } catch (e) {
-    return "Error: " + e.message;
+    return "Error: Connection Failed";
   }
-}
-
-// ── 번역 함수 ──
-async function translateText(text, targetLang) {
-  if (!text) return "";
-  const prompt = [
-    { role: 'system', content: `Translate into ${targetLang}. Only result.` },
-    { role: 'user', content: text }
-  ];
-  return await callAI(prompt);
 }
 
 let waitingQueue = [];
 let rooms = {};
 
 io.on('connection', (socket) => {
+  console.log('접속:', socket.id);
+
   socket.on('join_queue', ({ nickname, profile }) => {
     socket.nickname = nickname;
     socket.lang = profile.lang || 'ko';
     socket.country = profile.countryName || 'Unknown';
+
     if (waitingQueue.length > 0) {
       const partner = waitingQueue.shift();
+      if (partner.id === socket.id) { waitingQueue.push(socket); return; }
+      
       const roomId = socket.id + '_' + partner.id;
-      rooms[roomId] = { users: [socket, partner], turns: { [socket.id]: 0, [partner.id]: 0 }, history: { [socket.id]: [], [partner.id]: [] }, accepted: { [socket.id]: false, [partner.id]: false } };
+      rooms[roomId] = { 
+        users: [socket, partner], 
+        turns: { [socket.id]: 0, [partner.id]: 0 }, 
+        history: { [socket.id]: [], [partner.id]: [] },
+        accepted: { [socket.id]: false, [partner.id]: false }
+      };
       socket.join(roomId); partner.join(roomId);
       io.to(roomId).emit('matched', { roomId });
     } else {
@@ -87,17 +77,24 @@ io.on('connection', (socket) => {
   socket.on('screening_send', async ({ roomId, text }) => {
     const room = rooms[roomId];
     if (!room) return;
+    const partner = room.users.find(u => u.id !== socket.id);
+    
     socket.emit('screening_msg', { from: 'me', text });
     room.history[socket.id].push({ role: 'user', content: text });
     room.turns[socket.id]++;
+
     if (room.turns[socket.id] < 5) {
       socket.emit('screening_typing', true);
-      const aiPrompt = [{ role: 'system', content: `너는 20대 ${socket.country} 사람이야. '${socket.lang}'으로 짧게 대화해.` }, ...room.history[socket.id]];
+      // AI 지침을 아주 단순하게 수정
+      const aiPrompt = [
+        { role: 'system', content: `너는 20대 한국인이야. 아주 짧고 자연스럽게 한국어로 대화해.` },
+        ...room.history[socket.id]
+      ];
       const aiReply = await callAI(aiPrompt);
       socket.emit('screening_typing', false);
       socket.emit('screening_msg', { from: 'ai', text: aiReply });
     } else {
-      socket.emit('report_ready', { partnerNickname: "Partner", report: { summary: "Analysis Complete." } });
+      socket.emit('report_ready', { partnerNickname: partner.nickname, report: { summary: "분석 완료! 대화해보세요." } });
     }
   });
 
@@ -106,17 +103,13 @@ io.on('connection', (socket) => {
     if (!room) return;
     room.accepted[socket.id] = true;
     if (Object.values(room.accepted).every(v => v === true)) {
-      room.users.forEach(u => u.emit('chat_start', { partnerNickname: "Partner" }));
+      room.users.forEach(u => u.emit('chat_start', { partnerNickname: room.users.find(p => p.id !== u.id).nickname }));
     }
   });
 
-  socket.on('chat_send', async ({ roomId, text }) => {
-    const room = rooms[roomId];
-    if (!room) return;
-    const partner = room.users.find(u => u.id !== socket.id);
+  socket.on('chat_send', ({ roomId, text }) => {
+    socket.to(roomId).emit('chat_msg', { from: socket.nickname, text });
     socket.emit('chat_msg', { from: 'me', text });
-    const translated = await translateText(text, partner.lang);
-    partner.emit('chat_msg', { from: socket.nickname, text: translated, original: text });
   });
 
   socket.on('disconnect', () => {
