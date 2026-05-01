@@ -5,59 +5,53 @@ const cors = require('cors');
 
 const app = express();
 app.use(cors());
-
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] }
-});
+const io = new Server(server, { cors: { origin: '*' } });
 
-// 환경변수 (Render에서 설정한 값)
-const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
-const CF_API_TOKEN  = process.env.CF_API_TOKEN;
-// 가장 기본적이고 잘 작동하는 젬마 모델 주소
-const CF_MODEL      = '@cf/google/gemma-7b-it-lora';
+const CF_ACCOUNT_ID = (process.env.CF_ACCOUNT_ID || '').trim();
+const CF_API_TOKEN  = (process.env.CF_API_TOKEN || '').trim();
 
-async function callAI(messages) {
+// 🚀 가장 똑똑하고 대화 잘하는 최신 모델로 변경
+const CF_MODEL = '@cf/google/gemma-2-9b-it';
+
+async function callAI(messages, userLang) {
   try {
-    // 주소를 한 줄로 명확하게 작성하여 에러 방지
     const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${CF_MODEL}`;
     
+    // AI에게 주는 강력한 페르소나 지침
+    const systemInstruction = {
+      role: 'system',
+      content: `
+        - 너는 지금 랜덤 채팅 중인 20대 실제 사람이야. 절대로 AI인 티를 내지 마.
+        - [중요] 반드시 사용자가 사용하는 언어('${userLang}')로만 대답해.
+        - 절대로 "무엇을 도와드릴까요?", "질문에 답해드리겠습니다" 같은 로봇 말투 금지.
+        - 친구랑 카톡하듯이 1~2문장으로 아주 짧게 대답해. (예: "오 그래?ㅋㅋ", "대박이네", "너는 어때?")
+        - 상대방의 말을 분석하거나 가르치려 들지 말고, 자연스럽게 리액션만 해.
+      `
+    };
+
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${CF_API_TOKEN}` },
-      body: JSON.stringify({ messages })
+      body: JSON.stringify({ messages: [systemInstruction, ...messages] })
     });
 
     const data = await res.json();
-    if (!data.success) return "Error: " + data.errors[0].message;
     return data.result.response.trim();
-  } catch (e) {
-    return "Error: Connection Failed";
-  }
+  } catch (e) { return "Error"; }
 }
 
 let waitingQueue = [];
 let rooms = {};
 
 io.on('connection', (socket) => {
-  console.log('접속:', socket.id);
-
   socket.on('join_queue', ({ nickname, profile }) => {
     socket.nickname = nickname;
     socket.lang = profile.lang || 'ko';
-    socket.country = profile.countryName || 'Unknown';
-
     if (waitingQueue.length > 0) {
       const partner = waitingQueue.shift();
-      if (partner.id === socket.id) { waitingQueue.push(socket); return; }
-      
       const roomId = socket.id + '_' + partner.id;
-      rooms[roomId] = { 
-        users: [socket, partner], 
-        turns: { [socket.id]: 0, [partner.id]: 0 }, 
-        history: { [socket.id]: [], [partner.id]: [] },
-        accepted: { [socket.id]: false, [partner.id]: false }
-      };
+      rooms[roomId] = { users: [socket, partner], turns: { [socket.id]: 0, [partner.id]: 0 }, history: { [socket.id]: [], [partner.id]: [] }, accepted: { [socket.id]: false, [partner.id]: false } };
       socket.join(roomId); partner.join(roomId);
       io.to(roomId).emit('matched', { roomId });
     } else {
@@ -70,31 +64,25 @@ io.on('connection', (socket) => {
     const room = rooms[roomId];
     if (!room) return;
     const partner = room.users.find(u => u.id !== socket.id);
-    const msg = socket.lang === 'ko' ? `안녕! 반가워ㅋㅋ` : `Hi! Nice to meet you.`;
+    const msg = socket.lang === 'ko' ? "오 안녕!! 반가워ㅋㅋ" : (socket.lang === 'ja' ? "아, 안녕! 반가워! (あ、こんにちは！よろしくね！)" : "Hi! Nice to meet you!");
     socket.emit('screening_msg', { from: 'ai', text: `(상대방 ${partner.nickname}) ${msg}` });
   });
 
   socket.on('screening_send', async ({ roomId, text }) => {
     const room = rooms[roomId];
     if (!room) return;
-    const partner = room.users.find(u => u.id !== socket.id);
-    
     socket.emit('screening_msg', { from: 'me', text });
     room.history[socket.id].push({ role: 'user', content: text });
     room.turns[socket.id]++;
 
     if (room.turns[socket.id] < 5) {
       socket.emit('screening_typing', true);
-      // AI 지침을 아주 단순하게 수정
-      const aiPrompt = [
-        { role: 'system', content: `너는 20대 한국인이야. 아주 짧고 자연스럽게 한국어로 대화해.` },
-        ...room.history[socket.id]
-      ];
-      const aiReply = await callAI(aiPrompt);
+      const aiReply = await callAI(room.history[socket.id], socket.lang);
       socket.emit('screening_typing', false);
       socket.emit('screening_msg', { from: 'ai', text: aiReply });
+      room.history[socket.id].push({ role: 'assistant', content: aiReply });
     } else {
-      socket.emit('report_ready', { partnerNickname: partner.nickname, report: { summary: "분석 완료! 대화해보세요." } });
+      socket.emit('report_ready', { partnerNickname: "Partner", report: { summary: "분석 완료! 대화해보세요." } });
     }
   });
 
@@ -103,7 +91,7 @@ io.on('connection', (socket) => {
     if (!room) return;
     room.accepted[socket.id] = true;
     if (Object.values(room.accepted).every(v => v === true)) {
-      room.users.forEach(u => u.emit('chat_start', { partnerNickname: room.users.find(p => p.id !== u.id).nickname }));
+      room.users.forEach(u => u.emit('chat_start', { partnerNickname: "Partner" }));
     }
   });
 
