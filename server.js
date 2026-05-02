@@ -14,15 +14,13 @@ const io = new Server(server, {
 
 const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
 const CF_API_TOKEN  = process.env.CF_API_TOKEN;
-// 여러 최고 성능 모델들을 순차적으로 시도하는 폴백(Fallback) 시스템 도입
+// 아시아 언어(한국어/일본어) 처리에 최적화된 고품질 모델만 엄선 (오역이 심한 Llama 3.0은 제외)
 const CF_MODELS = [
-  '@cf/meta/llama-3.1-8b-instruct', // 1순위: 최신 다국어 완벽 지원 Llama 3.1
-  '@cf/qwen/qwen1.5-7b-chat-awq',   // 2순위: 아시아 언어(한/일) 특화 Qwen 7B
-  '@cf/google/gemma-7b-it',         // 3순위: 구글 Gemma 모델
-  '@cf/meta/llama-3-8b-instruct'    // 4순위: 최후의 보루 (기존 모델)
+  '@cf/qwen/qwen1.5-7b-chat-awq',   // 1순위: 한/일어 번역 압도적 1위 Qwen (가볍고 빠름)
+  '@cf/meta/llama-3.1-8b-instruct'  // 2순위: 다국어 성능이 대폭 개선된 Llama 3.1
 ];
 
-// --- 공통 AI API 호출기 (자동 롤백 기능 포함) ---
+// --- 공통 AI API 호출기 ---
 async function fetchFromAI(messages) {
   for (const model of CF_MODELS) {
     try {
@@ -34,14 +32,13 @@ async function fetchFromAI(messages) {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({ messages })
+        // 콜드 스타트(첫 구동) 시 10초 이상 걸릴 수 있으므로 8초 타임아웃 삭제
       });
       
       const data = await res.json();
       if (data.success && data.result && data.result.response) {
-        console.log(`✅ [AI 성공] 사용된 모델: ${model}`);
         return data.result.response;
       }
-      console.log(`⚠️ [AI 경고] 모델 실패: ${model}`);
     } catch (e) {
       console.log(`⚠️ [AI 에러] 모델: ${model}, 사유: ${e.message}`);
     }
@@ -79,15 +76,13 @@ async function translateWithAI(text, fromCode, toCode) {
   
   try {
     const messages = [
-      { role: 'system', content: `You are an expert native translator specializing in casual messenger chats.
-Translate the given text into perfectly natural, native-sounding ${toLang}.
-Context: The text is a short message from a dating/chat app.
+      { role: 'system', content: `You are a top-tier native translator for a casual dating app.
+Translate the following text into perfectly natural, colloquial ${toLang}.
+
 CRITICAL RULES:
-1. NEVER use literal translation. Capture the exact tone, nuance, and politeness level.
-2. Maintain the context perfectly (e.g., "여자분이시죠?" means "Are you a woman?", NOT "I am a woman").
-3. Make it sound like a native person speaking naturally.
-4. Output ONLY the final translated text. DO NOT add quotes, notes, or English.
-5. Use ONLY the native script of ${toLang}. NEVER MIX KANJI AND HANGUL.` },
+1. Translate the INTENT and VIBE, not the literal words. (e.g. If Korean is "여자분이세요?", translate to "女性の方ですか？" in Japanese. NEVER use derogatory terms like "お前").
+2. Use polite but friendly casual language suitable for 20-30 year olds chatting online.
+3. NEVER mix languages or scripts. Output ONLY the perfectly translated ${toLang} text. No quotes, no explanations.` },
       { role: 'user', content: text }
     ];
 
