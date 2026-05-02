@@ -14,8 +14,8 @@ const io = new Server(server, {
 
 const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
 const CF_API_TOKEN  = process.env.CF_API_TOKEN;
-// 전 세계 수십 개 언어(영어, 프랑스어, 스페인어 등)를 완벽히 지원하며, 가장 까다로운 동아시아 언어 뉘앙스까지 마스터한 글로벌 Qwen 14B 모델
-const CF_MODEL      = '@cf/qwen/qwen1.5-14b-chat-awq'; 
+// 가장 빠르고 안정적인 공식 지원 모델 Llama 3 사용 (Qwen 모델 에러로 인한 롤백 및 프롬프트 최적화 유지)
+const CF_MODEL      = '@cf/meta/llama-3-8b-instruct'; 
 
 // --- 언어 매핑 ---
 const langMap = {
