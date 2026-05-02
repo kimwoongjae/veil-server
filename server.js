@@ -14,40 +14,39 @@ const io = new Server(server, {
 
 const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
 const CF_API_TOKEN  = process.env.CF_API_TOKEN;
-const CF_MODEL      = '@cf/meta/llama-3-8b-instruct'; 
+// 전 세계 수십 개 언어(영어, 프랑스어, 스페인어 등)를 완벽히 지원하며, 가장 까다로운 동아시아 언어 뉘앙스까지 마스터한 글로벌 Qwen 14B 모델
+const CF_MODEL      = '@cf/qwen/qwen1.5-14b-chat-awq'; 
 
 // --- 언어 매핑 ---
 const langMap = {
   'ko': 'Korean',
   'en': 'English',
   'ja': 'Japanese',
-  'zh': 'Chinese'
+  'zh': 'Chinese',
+  'vi': 'Vietnamese',
+  'fr': 'French',
+  'pt': 'Portuguese',
+  'es': 'Spanish',
+  'de': 'German',
+  'ru': 'Russian',
+  'ar': 'Arabic',
+  'hi': 'Hindi'
 };
 
 function getLangName(code) {
   return langMap[code] || 'English';
 }
 
-// --- 번역 통역사 전용 모델 (Meta M2M100) ---
-const CF_TRANSLATE_MODEL = '@cf/meta/m2m100-1.2b';
-
-const m2mMap = {
-  'ko': 'korean',
-  'en': 'english',
-  'ja': 'japanese',
-  'zh': 'chinese'
-};
-
 async function translateWithAI(text, fromCode, toCode) {
   if (fromCode === toCode || !text) return text;
   
-  const sourceLang = m2mMap[fromCode] || 'english';
-  const targetLang = m2mMap[toCode] || 'english';
+  const fromLang = getLangName(fromCode);
+  const toLang = getLangName(toCode);
   
-  console.log(`🌐 [전문 번역 모델 가동] ${sourceLang} -> ${targetLang}`);
+  console.log(`🌐 [초고성능 번역 중...] ${fromLang} -> ${toLang}`);
   
   try {
-    const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${CF_TRANSLATE_MODEL}`;
+    const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${CF_MODEL}`;
     const res = await fetch(url, {
       method: 'POST',
       headers: { 
@@ -55,9 +54,18 @@ async function translateWithAI(text, fromCode, toCode) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        text: text,
-        source_lang: sourceLang,
-        target_lang: targetLang
+        messages: [
+          { role: 'system', content: `You are an expert native translator specializing in casual messenger chats.
+Translate the given text into perfectly natural, native-sounding ${toLang}.
+Context: The text is a short message from a dating/chat app.
+CRITICAL RULES:
+1. NEVER use literal translation. Capture the exact tone, nuance, and politeness level.
+2. Maintain the context perfectly (e.g., "여자분이시죠?" means "Are you a woman?", NOT "I am a woman").
+3. Make it sound like a native person speaking naturally.
+4. Output ONLY the final translated text. DO NOT add quotes, notes, or English.
+5. Use ONLY the native script of ${toLang}.` },
+          { role: 'user', content: text }
+        ]
       })
     });
     
@@ -67,7 +75,11 @@ async function translateWithAI(text, fromCode, toCode) {
       throw new Error("Translation API Failed");
     }
     
-    return data.result?.translated_text?.trim() || text;
+    let result = data.result?.response?.trim() || text;
+    if (result.startsWith('"') && result.endsWith('"')) {
+      result = result.slice(1, -1);
+    }
+    return result;
   } catch (e) {
     console.log("❌ [번역 에러]:", e.message);
     return text;
