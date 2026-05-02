@@ -47,7 +47,14 @@ async function translateWithAI(text, fromCode, toCode) {
       },
       body: JSON.stringify({
         messages: [
-          { role: 'system', content: `You are a professional translator. Translate the given text into ${toLang}. Output ONLY the translated text, nothing else. Do not add any quotes, explanations or notes.` },
+          { role: 'system', content: `You are an expert native translator specializing in casual messenger chats.
+Translate the given text into perfectly natural, native-sounding ${toLang}.
+Context: The text is a short message from a casual chat app.
+CRITICAL RULES:
+1. NEVER use literal, word-for-word translation. Capture the true meaning and natural tone. (e.g., 'そうです' -> '맞아요', '何歳ですか' -> '몇 살이세요?')
+2. Make it sound like a native 20-something year old speaking naturally.
+3. Output ONLY the final translated text. DO NOT add quotes, notes, or English.
+4. Use ONLY the native script of ${toLang}.` },
           { role: 'user', content: text }
         ]
       })
@@ -86,13 +93,14 @@ async function callAI(partnerNick, myNick, objective, history, myLangCode) {
         messages: [
           { 
             role: 'system', 
-            content: `[필독 지침: 절대로 AI인 것을 들키지 마라]
-- 너의 이름은 '${myNick}'이고, 상대방은 '${partnerNick}'이야.
-- 너는 주인을 대신해 상대방을 검증하는 AI 비서야. 하지만 절대 AI 티를 내면 안 돼. 실제 사람처럼 연기해.
-- 🎯 주인님의 특명(Objective): "${objective}"
-- 위 특명을 완수하기 위해 상대방에게 자연스럽게 질문하고 대화를 리드해.
-- **가장 중요한 규칙: 반드시 ${myLang} 언어로만 대답해.**
-- 인터넷 메신저로 대화하듯이 아주 짧고 자연스러운 구어체로 대답해.` 
+            content: `You are roleplaying as a human named '${myNick}', chatting with '${partnerNick}'.
+Your Objective: "${objective}"
+
+CRITICAL RULES:
+1. You MUST write your response ENTIRELY in ${myLang} native script.
+2. NEVER use English or Romaji. If ${myLang} is Korean, use ONLY Hangul. If Japanese, use ONLY Kana/Kanji.
+3. NEVER say you are an AI, an assistant, or a model. Act like a real person on a chat app.
+4. Keep your responses short, natural, and casual (like a mobile text message).` 
           },
           ...history
         ]
@@ -126,8 +134,9 @@ async function generateReport(history, myLangCode) {
       },
       body: JSON.stringify({
         messages: [
-          { role: 'system', content: `너는 심리 분석가야. 대화 내용을 보고 상대방의 성격, 특징, 관심사를 요약해줘. 무조건 ${myLang} 언어로 작성해야 해.` },
-          { role: 'user', content: `이 대화 내용을 보고 상대방의 특징을 3문장으로 알려줘: ${JSON.stringify(history)}` }
+          { role: 'system', content: `You are a psychologist analyzing a chat log. Summarize the opponent's personality, traits, and interests based on the chat.
+CRITICAL: You MUST write your summary ENTIRELY in ${myLang} native script. NO English. Keep it to 3 short sentences.` },
+          { role: 'user', content: `Analyze the opponent in this chat log: ${JSON.stringify(history)}` }
         ]
       })
     });
