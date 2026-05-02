@@ -14,8 +14,40 @@ const io = new Server(server, {
 
 const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
 const CF_API_TOKEN  = process.env.CF_API_TOKEN;
-// 가장 빠르고 안정적인 공식 지원 모델 Llama 3 사용 (Qwen 모델 에러로 인한 롤백 및 프롬프트 최적화 유지)
-const CF_MODEL      = '@cf/meta/llama-3-8b-instruct'; 
+// 여러 최고 성능 모델들을 순차적으로 시도하는 폴백(Fallback) 시스템 도입
+const CF_MODELS = [
+  '@cf/meta/llama-3.1-8b-instruct', // 1순위: 최신 다국어 완벽 지원 Llama 3.1
+  '@cf/qwen/qwen1.5-7b-chat-awq',   // 2순위: 아시아 언어(한/일) 특화 Qwen 7B
+  '@cf/google/gemma-7b-it',         // 3순위: 구글 Gemma 모델
+  '@cf/meta/llama-3-8b-instruct'    // 4순위: 최후의 보루 (기존 모델)
+];
+
+// --- 공통 AI API 호출기 (자동 롤백 기능 포함) ---
+async function fetchFromAI(messages) {
+  for (const model of CF_MODELS) {
+    try {
+      const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${model}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 
+          'Authorization': `Bearer ${CF_API_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ messages })
+      });
+      
+      const data = await res.json();
+      if (data.success && data.result && data.result.response) {
+        console.log(`✅ [AI 성공] 사용된 모델: ${model}`);
+        return data.result.response;
+      }
+      console.log(`⚠️ [AI 경고] 모델 실패: ${model}`);
+    } catch (e) {
+      console.log(`⚠️ [AI 에러] 모델: ${model}, 사유: ${e.message}`);
+    }
+  }
+  throw new Error("모든 AI 모델의 응답이 실패했습니다.");
+}
 
 // --- 언어 매핑 ---
 const langMap = {
@@ -46,16 +78,8 @@ async function translateWithAI(text, fromCode, toCode) {
   console.log(`🌐 [초고성능 번역 중...] ${fromLang} -> ${toLang}`);
   
   try {
-    const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${CF_MODEL}`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 
-        'Authorization': `Bearer ${CF_API_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        messages: [
-          { role: 'system', content: `You are an expert native translator specializing in casual messenger chats.
+    const messages = [
+      { role: 'system', content: `You are an expert native translator specializing in casual messenger chats.
 Translate the given text into perfectly natural, native-sounding ${toLang}.
 Context: The text is a short message from a dating/chat app.
 CRITICAL RULES:
@@ -63,19 +87,13 @@ CRITICAL RULES:
 2. Maintain the context perfectly (e.g., "여자분이시죠?" means "Are you a woman?", NOT "I am a woman").
 3. Make it sound like a native person speaking naturally.
 4. Output ONLY the final translated text. DO NOT add quotes, notes, or English.
-5. Use ONLY the native script of ${toLang}.` },
-          { role: 'user', content: text }
-        ]
-      })
-    });
+5. Use ONLY the native script of ${toLang}. NEVER MIX KANJI AND HANGUL.` },
+      { role: 'user', content: text }
+    ];
+
+    let result = await fetchFromAI(messages);
+    result = result.trim();
     
-    const data = await res.json();
-    if (!data.success) {
-      console.log("❌ [번역 API 에러]:", data.errors);
-      throw new Error("Translation API Failed");
-    }
-    
-    let result = data.result?.response?.trim() || text;
     if (result.startsWith('"') && result.endsWith('"')) {
       result = result.slice(1, -1);
     }
@@ -92,19 +110,10 @@ async function callAI(partnerNick, myNick, objective, history, myLangCode) {
   console.log(`🤖 [AI 대화 생성] (이름: ${myNick}, 언어: ${myLang})`);
   
   try {
-    const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${CF_MODEL}`;
-    
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 
-        'Authorization': `Bearer ${CF_API_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        messages: [
-          { 
-            role: 'system', 
-            content: `You are roleplaying as a human named '${myNick}', chatting with '${partnerNick}'.
+    const messages = [
+      { 
+        role: 'system', 
+        content: `You are roleplaying as a human named '${myNick}', chatting with '${partnerNick}'.
 Your Objective: "${objective}"
 
 CRITICAL RULES:
@@ -112,18 +121,11 @@ CRITICAL RULES:
 2. NEVER use English or Romaji. If ${myLang} is Korean, use ONLY Hangul. If Japanese, use ONLY Kana/Kanji.
 3. NEVER say you are an AI, an assistant, or a model. Act like a real person on a chat app.
 4. Keep your responses short, natural, and casual (like a mobile text message).` 
-          },
-          ...history
-        ]
-      })
-    });
+      },
+      ...history
+    ];
 
-    const data = await res.json();
-    if (!data.success) {
-      throw new Error("AI API 호출 실패");
-    }
-
-    const reply = data.result?.response;
+    let reply = await fetchFromAI(messages);
     if (!reply) return "어라? 뭐라고?";
     return reply.trim();
   } catch (e) {
@@ -135,26 +137,25 @@ CRITICAL RULES:
 // --- 분석 보고서 생성 함수 ---
 async function generateReport(history, myLangCode) {
   const myLang = getLangName(myLangCode);
+  const chatScript = history.map(m => `${m.role === 'assistant' ? 'Me' : 'Opponent'}: ${m.content}`).join('\n');
+  
   try {
-    const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${CF_MODEL}`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 
-        'Authorization': `Bearer ${CF_API_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        messages: [
-          { role: 'system', content: `You are a psychologist analyzing a chat log. Summarize the opponent's personality, traits, and interests based on the chat.
-CRITICAL: You MUST write your summary ENTIRELY in ${myLang} native script. NO English. Keep it to 3 short sentences.` },
-          { role: 'user', content: `Analyze the opponent in this chat log: ${JSON.stringify(history)}` }
-        ]
-      })
-    });
-    const data = await res.json();
-    return data.result?.response?.trim() || "대화가 아주 잘 통하는 분인 것 같아요!";
+    const messages = [
+      { role: 'system', content: `You are a psychologist analyzing a chat log. Summarize the Opponent's personality and conversational style in 3 short sentences.
+CRITICAL RULE: You MUST write your summary ENTIRELY in ${myLang}. Do NOT use English.` },
+      { role: 'user', content: `Chat Log:\n${chatScript}\n\nProvide the summary now:` }
+    ];
+
+    let result = await fetchFromAI(messages);
+    result = result.trim();
+    
+    // 간혹 AI가 응답을 따옴표로 감싸거나 비정상적인 따옴표 뭉치를 보내는 경우 정제
+    result = result.replace(/^"+|"+$/g, '').trim();
+    if (!result) result = "상대방은 대화를 즐겁게 이어나가는 긍정적인 성격으로 보입니다.";
+    
+    return result;
   } catch (e) {
-    return "대화가 아주 잘 통하는 분인 것 같아요!";
+    return "상대방은 대화를 즐겁게 이어나가는 긍정적인 성격으로 보입니다.";
   }
 }
 
