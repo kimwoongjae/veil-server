@@ -19,13 +19,12 @@ const CF_MODEL      = '@cf/google/gemma-2-9b-it';
 
 // --- AI 호출 함수 ---
 async function callAI(partnerNick, myNick, history) {
-  console.log(`🤖 AI 연기 중... (이름: ${partnerNick})`);
+  console.log(`🤖 [AI 호출 시작] 연기 중... (이름: ${partnerNick})`);
   
   try {
-    // node-fetch 임포트 (버전에 따라 dynamic import 필요할 수 있음)
-    const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
     const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${CF_MODEL}`;
     
+    // 네이티브 fetch 사용 (Node 18+ 지원, Render 기본 환경)
     const res = await fetch(url, {
       method: 'POST',
       headers: { 
@@ -49,14 +48,25 @@ async function callAI(partnerNick, myNick, history) {
       })
     });
 
+    console.log(`📡 [API 응답 상태 코드]: ${res.status}`);
+    
     const data = await res.json();
+    console.log(`📦 [API 응답 데이터]:`, JSON.stringify(data).substring(0, 200));
+
     if (!data.success) {
-      console.log("Cloudflare API Error:", data.errors);
-      throw new Error("AI 호출 실패");
+      console.log("❌ [Cloudflare API Error]:", data.errors);
+      throw new Error("AI API 호출 결과가 success=false 입니다.");
     }
-    return data.result.response.trim();
+
+    const reply = data.result?.response;
+    if (!reply) {
+      console.log("❌ [응답 비어있음]: API가 빈 문자열을 반환했습니다.");
+      return "어라? 잠깐 딴생각했어ㅋㅋ 뭐라고?";
+    }
+
+    return reply.trim();
   } catch (e) {
-    console.log("❌ AI 에러:", e.message);
+    console.log("❌ [서버 내부 에러 발생]:", e.message);
     return "아 뭐야ㅋㅋ 나 방금 렉걸림. 다시 말해줘!";
   }
 }
@@ -64,7 +74,6 @@ async function callAI(partnerNick, myNick, history) {
 // --- 분석 보고서 생성 함수 ---
 async function generateReport(history) {
   try {
-    const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
     const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${CF_MODEL}`;
     const res = await fetch(url, {
       method: 'POST',
@@ -80,8 +89,9 @@ async function generateReport(history) {
       })
     });
     const data = await res.json();
-    return data.result.response.trim();
+    return data.result?.response?.trim() || "대화가 아주 잘 통하는 분인 것 같아요! 직접 대화하며 알아보세요.";
   } catch (e) {
+    console.log("❌ [리포트 생성 에러]:", e.message);
     return "대화가 아주 잘 통하는 분인 것 같아요! 직접 대화하며 알아보세요.";
   }
 }
