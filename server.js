@@ -28,17 +28,26 @@ function getLangName(code) {
   return langMap[code] || 'English';
 }
 
-// --- 번역 통역사 함수 ---
+// --- 번역 통역사 전용 모델 (Meta M2M100) ---
+const CF_TRANSLATE_MODEL = '@cf/meta/m2m100-1.2b';
+
+const m2mMap = {
+  'ko': 'korean',
+  'en': 'english',
+  'ja': 'japanese',
+  'zh': 'chinese'
+};
+
 async function translateWithAI(text, fromCode, toCode) {
   if (fromCode === toCode || !text) return text;
   
-  const fromLang = getLangName(fromCode);
-  const toLang = getLangName(toCode);
+  const sourceLang = m2mMap[fromCode] || 'english';
+  const targetLang = m2mMap[toCode] || 'english';
   
-  console.log(`🌐 [통역 중...] ${fromLang} -> ${toLang}`);
+  console.log(`🌐 [전문 번역 모델 가동] ${sourceLang} -> ${targetLang}`);
   
   try {
-    const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${CF_MODEL}`;
+    const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${CF_TRANSLATE_MODEL}`;
     const res = await fetch(url, {
       method: 'POST',
       headers: { 
@@ -46,29 +55,19 @@ async function translateWithAI(text, fromCode, toCode) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        messages: [
-          { role: 'system', content: `You are an expert native translator specializing in casual messenger chats.
-Translate the given text into perfectly natural, native-sounding ${toLang}.
-Context: The text is a short message from a casual chat app.
-CRITICAL RULES:
-1. NEVER use literal, word-for-word translation. Capture the true meaning and natural tone. (e.g., 'そうです' -> '맞아요', '何歳ですか' -> '몇 살이세요?')
-2. Make it sound like a native 20-something year old speaking naturally.
-3. Output ONLY the final translated text. DO NOT add quotes, notes, or English.
-4. Use ONLY the native script of ${toLang}.` },
-          { role: 'user', content: text }
-        ]
+        text: text,
+        source_lang: sourceLang,
+        target_lang: targetLang
       })
     });
     
     const data = await res.json();
-    if (!data.success) throw new Error("Translation API Failed");
-    
-    let result = data.result?.response?.trim() || text;
-    // 간혹 AI가 겹따옴표를 붙여서 대답하는 경우 제거
-    if (result.startsWith('"') && result.endsWith('"')) {
-      result = result.slice(1, -1);
+    if (!data.success) {
+      console.log("❌ [번역 API 에러]:", data.errors);
+      throw new Error("Translation API Failed");
     }
-    return result;
+    
+    return data.result?.translated_text?.trim() || text;
   } catch (e) {
     console.log("❌ [번역 에러]:", e.message);
     return text;
