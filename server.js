@@ -18,7 +18,7 @@ const CF_API_TOKEN  = process.env.CF_API_TOKEN;
 const CF_MODEL      = '@cf/google/gemma-2-9b-it'; 
 
 // --- AI 호출 함수 ---
-async function callAI(text, partnerNick, myNick, history) {
+async function callAI(partnerNick, myNick, history) {
   console.log(`🤖 AI 연기 중... (이름: ${partnerNick})`);
   
   try {
@@ -38,14 +38,13 @@ async function callAI(text, partnerNick, myNick, history) {
             role: 'system', 
             content: `[필독 지침: 절대로 AI인 것을 들키지 마라]
 - 너의 이름은 '${partnerNick}'이고, 상대방은 '${myNick}'이야.
-- 너는 20대 한국인이고 지금 랜덤 채팅 중이야.
+- 너는 지금 인터넷 랜덤 채팅 중인 사람이야.
 - 절대로 "저는 AI입니다", "도와드릴까요?", "모델입니다" 같은 소리 하지 마.
-- 한국어로만 대답해. 영어 쓰면 상대방이 의심하니까 절대 금지야.
-- 친구랑 카톡하듯이 "ㅇㅇ", "ㅋㅋ", "진짜?", "대박" 같은 말투를 써서 아주 짧게 대답해.
+- **가장 중요한 규칙: 상대방이 말하는 언어(한국어, 일본어, 영어 등)와 동일한 언어로만 대답해.**
+- 친구랑 모바일 메신저로 대화하듯이 아주 짧고 자연스러운 구어체로 대답해.
 - 상대방에게 궁금한 점을 질문하며 대화를 자연스럽게 리드해.` 
           },
-          ...history,
-          { role: 'user', content: text }
+          ...history
         ]
       })
     });
@@ -132,7 +131,7 @@ io.on('connection', (socket) => {
 
     if (room.turns[socket.id] < 5) {
       socket.emit('screening_typing', true);
-      const aiReply = await callAI(text, partner.nickname, socket.nickname, room.history[socket.id]);
+      const aiReply = await callAI(partner.nickname, socket.nickname, room.history[socket.id]);
       socket.emit('screening_typing', false);
       
       socket.emit('screening_msg', { from: 'ai', text: aiReply });
