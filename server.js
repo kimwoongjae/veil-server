@@ -14,8 +14,8 @@ const io = new Server(server, {
 
 const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
 const CF_API_TOKEN  = process.env.CF_API_TOKEN;
-// 현재 클라우드플레어에서 제공하는 가장 똑똑한 구글 최신 모델
-const CF_MODEL      = '@cf/google/gemma-2-9b-it'; 
+// 현재 클라우드플레어에서 제공하는 가장 똑똑하고 확실하게 작동하는 무료 모델 (Llama 3)
+const CF_MODEL      = '@cf/meta/llama-3-8b-instruct'; 
 
 // --- AI 호출 함수 ---
 async function callAI(partnerNick, myNick, history) {
