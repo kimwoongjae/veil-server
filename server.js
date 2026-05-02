@@ -82,7 +82,8 @@ Translate the following text into perfectly natural, colloquial ${toLang}.
 CRITICAL RULES:
 1. Translate the INTENT and VIBE, not the literal words. (e.g. If Korean is "여자분이세요?", translate to "女性の方ですか？" in Japanese. NEVER use derogatory terms like "お前").
 2. Use polite but friendly casual language suitable for 20-30 year olds chatting online.
-3. NEVER mix languages or scripts. Output ONLY the perfectly translated ${toLang} text. No quotes, no explanations.` },
+3. NEVER mix languages or scripts. Output ONLY the perfectly translated ${toLang} text. No quotes, no explanations.
+4. ABSOLUTELY NO TRANSLATOR NOTES. NEVER output things like "(Note: ...)" or "I translated this as...".` },
       { role: 'user', content: text }
     ];
 
@@ -100,8 +101,15 @@ CRITICAL RULES:
 }
 
 // --- AI 호출 함수 ---
-async function callAI(partnerNick, myNick, objective, history, myLangCode) {
+async function callAI(partnerNick, myProfile, objective, history) {
+  const myLangCode = myProfile.lang || 'ko';
   const myLang = getLangName(myLangCode);
+  const myNick = myProfile.nickname || 'Unknown';
+  
+  let profileText = `Age: ${myProfile.age || 'Unknown'}, Gender: ${myProfile.gender || 'Unknown'}, Country: ${myProfile.countryName || 'Unknown'}`;
+  if (myProfile.hobby) profileText += `, Hobby: ${myProfile.hobby}`;
+  if (myProfile.personality) profileText += `, Personality: ${myProfile.personality}`;
+
   console.log(`🤖 [AI 대화 생성] (이름: ${myNick}, 언어: ${myLang})`);
   
   try {
@@ -109,12 +117,13 @@ async function callAI(partnerNick, myNick, objective, history, myLangCode) {
       { 
         role: 'system', 
         content: `You are roleplaying as a human named '${myNick}', chatting with '${partnerNick}'.
+Here is your persona/profile: ${profileText}
 Your Objective: "${objective}"
 
 CRITICAL RULES:
 1. You MUST write your response ENTIRELY in ${myLang} native script.
 2. NEVER use English or Romaji. If ${myLang} is Korean, use ONLY Hangul. If Japanese, use ONLY Kana/Kanji.
-3. NEVER say you are an AI, an assistant, or a model. Act like a real person on a chat app.
+3. NEVER say you are an AI, an assistant, or a model. Act like a real person on a chat app based strictly on your profile.
 4. Keep your responses short, natural, and casual (like a mobile text message).` 
       },
       ...history
@@ -190,10 +199,9 @@ async function startAutonomousScreening(roomId, userA, userB) {
     // 현재 화자의 AI가 화자의 모국어로 대답을 생성
     const aiReply = await callAI(
       currentListener.nickname, 
-      currentSpeaker.nickname, 
+      currentSpeaker.profile, 
       currentSpeaker.profile?.objective || "친절하게 대화해.",
-      room.history[currentSpeaker.id],
-      currentSpeaker.profile.lang
+      room.history[currentSpeaker.id]
     );
     
     if (!rooms[roomId]) break;
@@ -299,6 +307,10 @@ io.on('connection', (socket) => {
         text: translatedText,
         original: (translatedText !== text) ? text : null
     });
+  });
+  socket.on('leave_chat', ({ roomId }) => {
+    socket.to(roomId).emit('chat_ended');
+    delete rooms[roomId];
   });
 
   socket.on('disconnect', () => {
