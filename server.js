@@ -14,10 +14,13 @@ const io = new Server(server, {
 
 const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
 const CF_API_TOKEN  = process.env.CF_API_TOKEN;
-// 아시아 언어(한국어/일본어) 처리에 최적화된 고품질 모델만 엄선 (오역이 심한 Llama 3.0은 제외)
+// 글로벌 서비스 및 아시아 4개 국어(한/일/영/중)의 미묘한 뉘앙스 처리에 최적화된 최상위 모델군
 const CF_MODELS = [
-  '@cf/qwen/qwen1.5-7b-chat-awq',   // 1순위: 한/일어 번역 압도적 1위 Qwen (가볍고 빠름)
-  '@cf/meta/llama-3.1-8b-instruct'  // 2순위: 다국어 성능이 대폭 개선된 Llama 3.1
+  '@cf/google/gemma-4-26b-a4b-it',     // 1순위: 사용자 요청 최신 젬마 모델 (번역 품질 우수)
+  '@cf/meta/llama-3.1-70b-instruct',   // 2순위: 70B 대형 모델 (복잡한 뉘앙스 및 상황 파악)
+  '@cf/meta/llama-4-scout-17b-16e-instruct', // 3순위: 차세대 Llama 4 Scout (고성능/고속)
+  '@cf/qwen/qwen1.5-7b-chat-awq',      // 백업: 아시아 언어 보조
+  '@cf/meta/llama-3.1-8b-instruct'     // 백업: 안정성 위주
 ];
 
 // --- 공통 AI API 호출기 ---
