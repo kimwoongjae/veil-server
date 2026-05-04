@@ -281,82 +281,76 @@ async function startAutonomousScreening(roomId, userA, userB) {
   userB.emit('report_ready', { partnerNickname: userA.nickname, report: reportB });
 }
 
-const onlineUsers = {}; // { socketId: { nickname, profile, socket } }
+let waitingQueue = []; // { id, nickname, profile, socket }
 const rooms = {};
-
-// --- 헬퍼: 로비 데이터 생성 ---
-function getLobbyData() {
-  return Object.values(onlineUsers).map(u => ({
-    id: u.socket.id,
-    nickname: u.nickname,
-    profile: u.profile
-  }));
-}
 
 io.on('connection', (socket) => {
   console.log('✅ 새 사용자 접속:', socket.id);
 
-  // --- 1. 로비 입장 및 정보 업데이트 ---
-  socket.on('join_lobby', (data) => {
+  // --- 1. 매칭 대기열 합류 ---
+  socket.on('join_queue', (data) => {
     socket.nickname = data.nickname;
     socket.profile = data.profile || { lang: 'ko' };
-    onlineUsers[socket.id] = { nickname: data.nickname, profile: socket.profile, socket };
     
-    io.emit('lobby_update', getLobbyData());
-    console.log(`🏠 [Lobby] ${socket.nickname} joined. Total: ${Object.keys(onlineUsers).length}`);
-  });
+    if (waitingQueue.length > 0) {
+      const partner = waitingQueue.shift();
+      if (partner.id === socket.id) {
+        waitingQueue.push(socket);
+        return;
+      }
 
-  // --- 2. 대화 요청 (AI_FIRST 또는 DIRECT) ---
-  socket.on('request_chat', (data) => {
-    const targetSocket = onlineUsers[data.targetId]?.socket;
-    if (!targetSocket) return socket.emit('error_msg', 'Target user not found.');
-
-    console.log(`📩 [Request] ${socket.nickname} -> ${targetSocket.nickname} (Mode: ${data.mode})`);
-    
-    targetSocket.emit('incoming_request', {
-      fromId: socket.id,
-      fromNickname: socket.nickname,
-      fromProfile: socket.profile,
-      mode: data.mode
-    });
-  });
-
-  // --- 3. 요청 응답 (수락/거절) ---
-  socket.on('respond_request', (data) => {
-    const requesterSocket = onlineUsers[data.requesterId]?.socket;
-    if (!requesterSocket) return;
-
-    if (data.accepted) {
-      const roomId = `room_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-      rooms[roomId] = {
-        users: [requesterSocket, socket],
-        history: { [requesterSocket.id]: [], [socket.id]: [] },
-        realHistory: [],
-        accepted: { [requesterSocket.id]: true, [socket.id]: true } // DIRECT인 경우 바로 시작을 위해
-      };
-
-      [requesterSocket, socket].forEach(s => {
-        s.join(roomId);
-        s.roomId = roomId;
-        delete onlineUsers[s.id]; // 대화 중에는 로비에서 제거
+      console.log(`🤝 [Match Found] ${socket.nickname} <-> ${partner.nickname}`);
+      
+      // 파트너(먼저 기다리던 사람)에게 매칭 요청 알림
+      partner.emit('incoming_match', {
+        fromId: socket.id,
+        fromNickname: socket.nickname,
+        fromProfile: socket.profile
       });
 
-      io.emit('lobby_update', getLobbyData());
-
-      if (data.mode === 'AI_FIRST') {
-        // AI 모드인 경우 accepted 초기화 (리포트 후 수락 필요)
-        rooms[roomId].accepted[requesterSocket.id] = false;
-        rooms[roomId].accepted[socket.id] = false;
-        
-        io.to(roomId).emit('matched', { roomId });
-        startAutonomousScreening(roomId, requesterSocket, socket);
-      } else {
-        // 직접 대화 모드
-        requesterSocket.emit('chat_start', { partnerNickname: socket.nickname });
-        socket.emit('chat_start', { partnerNickname: requesterSocket.nickname });
-      }
+      // 요청자(방금 누른 사람)에게는 대기 상태 전달
+      socket.emit('match_waiting', { partnerNickname: partner.nickname });
+      
+      // 임시 매칭 데이터 저장 (수락 대기용)
+      socket.pendingPartner = partner;
+      partner.pendingPartner = socket;
     } else {
-      requesterSocket.emit('request_declined', { fromNickname: socket.nickname });
+      waitingQueue.push(socket);
+      socket.emit('waiting');
+      console.log(`⏳ [Queue] ${socket.nickname} is waiting...`);
+    }
+  });
+
+  // --- 2. 매칭 수락/거절 ---
+  socket.on('respond_match', (data) => {
+    const partner = socket.pendingPartner;
+    if (!partner) return;
+
+    if (data.accepted) {
+      console.log(`✅ [Match Accepted] ${socket.nickname} accepted ${partner.nickname}`);
+      const roomId = `room_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+      
+      rooms[roomId] = {
+        users: [partner, socket],
+        history: { [partner.id]: [], [socket.id]: [] },
+        realHistory: [],
+        accepted: { [partner.id]: false, [socket.id]: false }
+      };
+
+      [partner, socket].forEach(s => {
+        s.join(roomId);
+        s.roomId = roomId;
+        delete s.pendingPartner;
+      });
+
+      io.to(roomId).emit('matched', { roomId });
+      startAutonomousScreening(roomId, partner, socket);
+    } else {
+      console.log(`❌ [Match Declined] ${socket.nickname} declined`);
+      partner.emit('match_declined');
+      delete socket.pendingPartner;
+      delete partner.pendingPartner;
+      // 거절한 사람은 다시 큐에 넣거나 메인으로 보냄 (클라이언트에서 처리)
     }
   });
 
@@ -442,17 +436,11 @@ CRITICAL RULES:
 
   socket.on('disconnect', () => {
     console.log('❌ 사용자 접속 종료:', socket.id);
-    if (onlineUsers[socket.id]) {
-      delete onlineUsers[socket.id];
-      io.emit('lobby_update', getLobbyData());
-    }
+    waitingQueue = waitingQueue.filter(u => u.id !== socket.id);
 
-    // 대화 중이었던 방 정리
-    for (const roomId in rooms) {
-      if (rooms[roomId].users.some(u => u.id === socket.id)) {
-        socket.to(roomId).emit('chat_ended');
-        delete rooms[roomId];
-      }
+    if (socket.roomId && rooms[socket.roomId]) {
+      io.to(socket.roomId).emit('chat_ended');
+      delete rooms[socket.roomId];
     }
   });
 });
