@@ -293,32 +293,39 @@ io.on('connection', (socket) => {
     socket.profile = data.profile || { lang: 'ko' };
     socket.role = data.role; // 'matcher' 또는 'waiter'
     
-    if (socket.role === 'matcher') {
-      // 1-1. Matcher: 대기열에서 Waiter를 찾음
-      const waiter = waitingQueue.find(u => u.role === 'waiter');
-      if (waiter) {
-        waitingQueue = waitingQueue.filter(u => u.id !== waiter.id);
-        console.log(`🤝 [Match Found] Matcher(${socket.nickname}) -> Waiter(${waiter.nickname})`);
-        
-        waiter.emit('incoming_match', {
-          fromId: socket.id,
-          fromNickname: socket.nickname,
-          fromProfile: socket.profile
-        });
-        socket.emit('match_waiting', { partnerNickname: waiter.nickname });
-        
-        socket.pendingPartner = waiter;
-        waiter.pendingPartner = socket;
-      } else {
-        socket.emit('error_msg', '대기 중인 사용자가 없습니다. 잠시 후 다시 시도해 주세요.');
-      }
-    } else {
-      // 1-2. Waiter: 대기열에 들어감
-      waitingQueue.push(socket);
-      socket.emit('waiting');
-      console.log(`⏳ [Queue] Waiter ${socket.nickname} is waiting...`);
-    }
+    // 이미 큐에 있다면 제거 후 다시 삽입 (중복 방지)
+    waitingQueue = waitingQueue.filter(u => u.id !== socket.id);
+    waitingQueue.push(socket);
+    
+    console.log(`⏳ [Queue] ${socket.role.toUpperCase()} ${socket.nickname} joined. Total in queue: ${waitingQueue.length}`);
+    
+    // 매칭 시도
+    tryMatch();
   });
+
+  // --- 매칭 로직 분리 (재사용 가능) ---
+  function tryMatch() {
+    const matcher = waitingQueue.find(u => u.role === 'matcher');
+    const waiter = waitingQueue.find(u => u.role === 'waiter');
+
+    if (matcher && waiter) {
+      // 큐에서 제거
+      waitingQueue = waitingQueue.filter(u => u.id !== matcher.id && u.id !== waiter.id);
+      
+      console.log(`🤝 [Match Success] Matcher(${matcher.nickname}) <-> Waiter(${waiter.nickname})`);
+      
+      // 파트너 정보 교환 및 수락 대기 상태 진입
+      waiter.emit('incoming_match', {
+        fromId: matcher.id,
+        fromNickname: matcher.nickname,
+        fromProfile: matcher.profile
+      });
+      matcher.emit('match_waiting', { partnerNickname: waiter.nickname });
+      
+      matcher.pendingPartner = waiter;
+      waiter.pendingPartner = matcher;
+    }
+  }
 
   // --- 2. 매칭 수락/거절 ---
   socket.on('respond_match', (data) => {
