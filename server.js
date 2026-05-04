@@ -281,36 +281,82 @@ async function startAutonomousScreening(roomId, userA, userB) {
   userB.emit('report_ready', { partnerNickname: userA.nickname, report: reportB });
 }
 
-let waitingQueue = [];
-let rooms = {};
+const onlineUsers = {}; // { socketId: { nickname, profile, socket } }
+const rooms = {};
+
+// --- 헬퍼: 로비 데이터 생성 ---
+function getLobbyData() {
+  return Object.values(onlineUsers).map(u => ({
+    id: u.socket.id,
+    nickname: u.nickname,
+    profile: u.profile
+  }));
+}
 
 io.on('connection', (socket) => {
   console.log('✅ 새 사용자 접속:', socket.id);
 
-  socket.on('join_queue', ({ nickname, profile }) => {
-    socket.nickname = nickname;
-    socket.profile = profile || {};
-    socket.profile.lang = socket.profile.lang || 'ko';
+  // --- 1. 로비 입장 및 정보 업데이트 ---
+  socket.on('join_lobby', (data) => {
+    socket.nickname = data.nickname;
+    socket.profile = data.profile || { lang: 'ko' };
+    onlineUsers[socket.id] = { nickname: data.nickname, profile: socket.profile, socket };
+    
+    io.emit('lobby_update', getLobbyData());
+    console.log(`🏠 [Lobby] ${socket.nickname} joined. Total: ${Object.keys(onlineUsers).length}`);
+  });
 
-    if (waitingQueue.length > 0) {
-      const partner = waitingQueue.shift();
-      if (partner.id === socket.id) { waitingQueue.push(socket); return; }
+  // --- 2. 대화 요청 (AI_FIRST 또는 DIRECT) ---
+  socket.on('request_chat', (data) => {
+    const targetSocket = onlineUsers[data.targetId]?.socket;
+    if (!targetSocket) return socket.emit('error_msg', 'Target user not found.');
 
-      const roomId = socket.id + '_' + partner.id;
+    console.log(`📩 [Request] ${socket.nickname} -> ${targetSocket.nickname} (Mode: ${data.mode})`);
+    
+    targetSocket.emit('incoming_request', {
+      fromId: socket.id,
+      fromNickname: socket.nickname,
+      fromProfile: socket.profile,
+      mode: data.mode
+    });
+  });
+
+  // --- 3. 요청 응답 (수락/거절) ---
+  socket.on('respond_request', (data) => {
+    const requesterSocket = onlineUsers[data.requesterId]?.socket;
+    if (!requesterSocket) return;
+
+    if (data.accepted) {
+      const roomId = `room_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
       rooms[roomId] = {
-        users: [socket, partner],
-        history: { [socket.id]: [], [partner.id]: [] },
-        realHistory: [], // 실제 채팅 내역 저장용
-        accepted: { [socket.id]: false, [partner.id]: false }
+        users: [requesterSocket, socket],
+        history: { [requesterSocket.id]: [], [socket.id]: [] },
+        realHistory: [],
+        accepted: { [requesterSocket.id]: true, [socket.id]: true } // DIRECT인 경우 바로 시작을 위해
       };
 
-      socket.join(roomId); partner.join(roomId);
-      io.to(roomId).emit('matched', { roomId });
-      
-      startAutonomousScreening(roomId, socket, partner);
+      [requesterSocket, socket].forEach(s => {
+        s.join(roomId);
+        s.roomId = roomId;
+        delete onlineUsers[s.id]; // 대화 중에는 로비에서 제거
+      });
+
+      io.emit('lobby_update', getLobbyData());
+
+      if (data.mode === 'AI_FIRST') {
+        // AI 모드인 경우 accepted 초기화 (리포트 후 수락 필요)
+        rooms[roomId].accepted[requesterSocket.id] = false;
+        rooms[roomId].accepted[socket.id] = false;
+        
+        io.to(roomId).emit('matched', { roomId });
+        startAutonomousScreening(roomId, requesterSocket, socket);
+      } else {
+        // 직접 대화 모드
+        requesterSocket.emit('chat_start', { partnerNickname: socket.nickname });
+        socket.emit('chat_start', { partnerNickname: requesterSocket.nickname });
+      }
     } else {
-      waitingQueue.push(socket);
-      socket.emit('waiting');
+      requesterSocket.emit('request_declined', { fromNickname: socket.nickname });
     }
   });
 
@@ -395,14 +441,19 @@ CRITICAL RULES:
   });
 
   socket.on('disconnect', () => {
-    waitingQueue = waitingQueue.filter(u => u.id !== socket.id);
+    console.log('❌ 사용자 접속 종료:', socket.id);
+    if (onlineUsers[socket.id]) {
+      delete onlineUsers[socket.id];
+      io.emit('lobby_update', getLobbyData());
+    }
+
+    // 대화 중이었던 방 정리
     for (const roomId in rooms) {
       if (rooms[roomId].users.some(u => u.id === socket.id)) {
-        socket.to(roomId).emit('chat_msg', { from: 'system', text: '상대방의 연결이 끊어졌습니다.' });
+        socket.to(roomId).emit('chat_ended');
         delete rooms[roomId];
       }
     }
-    console.log('❌ 사용자 접속 해제:', socket.id);
   });
 });
 
