@@ -384,8 +384,19 @@ io.on('connection', (socket) => {
     if (bothAccepted) {
       const userA = room.users[0];
       const userB = room.users[1];
-      userA.emit('chat_start', { partnerNickname: userB.nickname });
-      userB.emit('chat_start', { partnerNickname: userA.nickname });
+      
+      // 각자 언어에 맞는 히스토리 생성
+      const historyA = room.history[userA.id].map(m => ({
+        from: m.role === 'assistant' ? 'me' : 'partner',
+        text: m.content
+      }));
+      const historyB = room.history[userB.id].map(m => ({
+        from: m.role === 'assistant' ? 'me' : 'partner',
+        text: m.content
+      }));
+
+      userA.emit('chat_start', { partnerNickname: userB.nickname, history: historyA });
+      userB.emit('chat_start', { partnerNickname: userA.nickname, history: historyB });
     }
   });
 
