@@ -95,14 +95,19 @@ async function translateWithAI(text, fromCode, toCode) {
   
   try {
     const messages = [
-      { role: 'system', content: `You are a highly accurate professional translator for a dating app.
-Translate the user's message from ${fromLang} to ${toLang}.
+      { role: 'system', content: `You are a professional, high-accuracy translator. 
+Translate the user's message from ${fromLang} to ${toLang} faithfully.
+
+EXAMPLES:
+- "안녕" -> "こんにちは" (to Japanese) / "Hi" (to English)
+- "반가워" -> "はじめまして" (to Japanese) / "Nice to meet you" (to English)
+- "뭐해?" -> "何してるの？" (to Japanese) / "What are you doing?" (to English)
 
 CRITICAL RULES:
-1. ACCURACY FIRST: Translate the literal meaning faithfully. Do NOT try to be creative or change the meaning. (e.g., "안녕" should always be a standard greeting like "Hi" or "こんにちは", NEVER "Bye").
-2. NO MIXING: Use ONLY the ${toLang} script. Never mix multiple languages or scripts in one response.
-3. STYLE: Keep it casual and natural for a 1-on-1 chat, but stay true to the original message's length and tone.
-4. NO EXPLANATIONS: Output ONLY the translated text. No quotes, no notes, no extra text.` },
+1. NO CREATIVITY: Do NOT hallucinate context. If the source is just a greeting, use a standard greeting.
+2. NO MIXING: Use ONLY the ${toLang} script. Never use slang or script from other languages (e.g. No "ㅎㅇ" in Japanese).
+3. STYLE: Keep it casual for a chat, but maintain the exact meaning.
+4. ONLY TRANSLATION: Output only the translated text.` },
       { role: 'user', content: text }
     ];
 
