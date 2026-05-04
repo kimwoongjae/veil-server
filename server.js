@@ -46,12 +46,13 @@ async function fetchFromAI(messages) {
   throw new Error("모든 AI 모델의 응답이 실패했습니다.");
 }
 
-// --- 언어 매핑 ---
+// --- 언어 매핑 (전 세계 30개 이상의 언어 지원) ---
 const langMap = {
   'ko': 'Korean',
   'en': 'English',
   'ja': 'Japanese',
-  'zh': 'Chinese',
+  'zh': 'Chinese (Simplified)',
+  'zh-TW': 'Chinese (Traditional)',
   'vi': 'Vietnamese',
   'fr': 'French',
   'pt': 'Portuguese',
@@ -59,7 +60,25 @@ const langMap = {
   'de': 'German',
   'ru': 'Russian',
   'ar': 'Arabic',
-  'hi': 'Hindi'
+  'hi': 'Hindi',
+  'it': 'Italian',
+  'tr': 'Turkish',
+  'id': 'Indonesian',
+  'th': 'Thai',
+  'ms': 'Malay',
+  'nl': 'Dutch',
+  'pl': 'Polish',
+  'sv': 'Swedish',
+  'fil': 'Filipino',
+  'my': 'Burmese',
+  'km': 'Khmer',
+  'lo': 'Lao',
+  'bn': 'Bengali',
+  'pa': 'Punjabi',
+  'te': 'Telugu',
+  'mr': 'Marathi',
+  'ta': 'Tamil',
+  'ur': 'Urdu'
 };
 
 function getLangName(code) {
@@ -72,18 +91,19 @@ async function translateWithAI(text, fromCode, toCode) {
   const fromLang = getLangName(fromCode);
   const toLang = getLangName(toCode);
   
-  console.log(`🌐 [초고성능 번역 중...] ${fromLang} -> ${toLang}`);
+  console.log(`🌐 [Global Translation] ${fromLang} -> ${toLang}`);
   
   try {
     const messages = [
-      { role: 'system', content: `You are a top-tier native translator for a casual dating app.
-Translate the following text into perfectly natural, colloquial ${toLang}.
+      { role: 'system', content: `You are a world-class native translator specializing in casual, colloquial dating app conversations.
+Your goal is to translate the user's message from ${fromLang} to ${toLang} so it sounds perfectly natural to a native speaker.
 
-CRITICAL RULES:
-1. Translate the INTENT and VIBE, not the literal words. (e.g. If Korean is "여자분이세요?", translate to "女性の方ですか？" in Japanese. NEVER use derogatory terms like "お前").
-2. Use polite but friendly casual language suitable for 20-30 year olds chatting online.
-3. NEVER mix languages or scripts. Output ONLY the perfectly translated ${toLang} text. No quotes, no explanations.
-4. ABSOLUTELY NO TRANSLATOR NOTES. NEVER output things like "(Note: ...)" or "I translated this as...".` },
+CRITICAL RULES for High Quality:
+1. FOCUS on the target culture. If the target is Korean, use appropriate casual endings (e.g., -어, -야). If Japanese, use natural casual forms (e.g., -다ね, -だよ).
+2. If the text is in Korean/Japanese/Chinese/English, ensure the nuances of honorifics and social distance are maintained but kept casual enough for a 1-on-1 chat.
+3. Translate the INTENT, not just words. Use slang or idioms if they fit the vibe.
+4. NEVER output explanations, notes, or multiple options. Output ONLY the translated text in ${toLang}.
+5. Do NOT use translation software artifacts like "(Note: ...)" or "Literally: ...".` },
       { role: 'user', content: text }
     ];
 
@@ -116,15 +136,18 @@ async function callAI(partnerNick, myProfile, objective, history) {
     const messages = [
       { 
         role: 'system', 
-        content: `You are roleplaying as a human named '${myNick}', chatting with '${partnerNick}'.
-Here is your persona/profile: ${profileText}
-Your Objective: "${objective}"
+        content: `You are roleplaying as a human named '${myNick}', chatting with '${partnerNick}' on a casual dating/social app.
+Your Persona: ${profileText}
+Your Current Objective: "${objective}"
 
-CRITICAL RULES:
-1. You MUST write your response ENTIRELY in ${myLang} native script.
-2. NEVER use English or Romaji. If ${myLang} is Korean, use ONLY Hangul. If Japanese, use ONLY Kana/Kanji.
-3. NEVER say you are an AI, an assistant, or a model. Act like a real person on a chat app based strictly on your profile.
-4. Keep your responses short, natural, and casual (like a mobile text message).` 
+CRITICAL RULES for Authenticity:
+1. You MUST write ENTIRELY in ${myLang} native script.
+2. ACT like a real person, not an AI. Use casual, modern language that a 20-30 year old would use in ${myLang}.
+3. If ${myLang} is Korean, use natural casual endings like "~해", "~야", "ㅋㅋ", "ㅎㅎ".
+4. If ${myLang} is Japanese, use natural casual forms like "〜だよ", "〜だね", "笑".
+5. If ${myLang} is Chinese, use natural colloquialisms and avoid formal business-like phrasing.
+6. Keep messages short and engaging (1-2 sentences), like a real mobile text message.
+7. NEVER mention you are a model or assistant. Stay in character at all times.` 
       },
       ...history
     ];
