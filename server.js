@@ -127,8 +127,8 @@ CRITICAL RULES:
   }
 }
 
-// --- AI 호출 함수 ---
-async function callAI(partnerNick, myProfile, objective, history) {
+// --- ⚡ 초고속 일석이조 AI 호출 (생성+번역 한 번에) ---
+async function callAIWithTranslation(partnerNick, myProfile, targetLangName, objective, history) {
   const myLangCode = myProfile.lang || 'ko';
   const myLang = getLangName(myLangCode);
   const myNick = myProfile.nickname || 'Unknown';
@@ -137,34 +137,41 @@ async function callAI(partnerNick, myProfile, objective, history) {
   if (myProfile.hobby) profileText += `, Hobby: ${myProfile.hobby}`;
   if (myProfile.personality) profileText += `, Personality: ${myProfile.personality}`;
 
-  console.log(`🤖 [AI 대화 생성] (이름: ${myNick}, 언어: ${myLang})`);
+  console.log(`⚡ [Speed Gen] ${myNick}(${myLang}) -> Target(${targetLangName})`);
   
   try {
     const messages = [
       { 
         role: 'system', 
-        content: `You are roleplaying as a human named '${myNick}', chatting with '${partnerNick}' on a casual dating/social app.
-Your Persona: ${profileText}
-Your Current Objective: "${objective}"
+        content: `You are roleplaying as '${myNick}', chatting with '${partnerNick}'.
+Persona: ${profileText}
+Objective: "${objective}"
 
-CRITICAL RULES for Authenticity:
-1. You MUST write ENTIRELY in ${myLang} native script.
-2. ACT like a real person, not an AI. Use casual, modern language that a 20-30 year old would use in ${myLang}.
-3. If ${myLang} is Korean, use natural casual endings like "~해", "~야", "ㅋㅋ", "ㅎㅎ".
-4. If ${myLang} is Japanese, use natural casual forms like "〜だよ", "〜だね", "笑".
-5. If ${myLang} is Chinese, use natural colloquialisms and avoid formal business-like phrasing.
-6. Keep messages short and engaging (1-2 sentences), like a real mobile text message.
-7. NEVER mention you are a model or assistant. Stay in character at all times.` 
+CRITICAL: You must provide your response in a strict JSON format with exactly two fields:
+1. "reply": Your casual response in native ${myLang}.
+2. "translation": The exact translation of that response into ${targetLangName}.
+
+Rules:
+- Be casual, like a mobile text (1-2 sentences).
+- Use natural expressions (e.g. Korean casual "~해", Japanese casual "〜だよ").
+- Output ONLY the JSON string. No explanations.` 
       },
       ...history
     ];
 
-    let reply = await fetchFromAI(messages);
-    if (!reply) return "어라? 뭐라고?";
-    return reply.trim();
+    let result = await fetchFromAI(messages);
+    if (!result) return { reply: "...", translation: "..." };
+
+    // JSON 파싱 (경계 부호 등 제거)
+    const jsonStr = result.substring(result.indexOf('{'), result.lastIndexOf('}') + 1);
+    const parsed = JSON.parse(jsonStr);
+    return {
+      reply: parsed.reply.trim(),
+      translation: parsed.translation.trim()
+    };
   } catch (e) {
-    console.log("❌ [AI 생성 에러]:", e.message);
-    return "...";
+    console.log("❌ [AI Speed Gen 에러]:", e.message);
+    return { reply: "...", translation: "..." };
   }
 }
 
@@ -223,24 +230,25 @@ async function startInteractiveScreening(roomId, matcher, waiter) {
 
     // 1. AI 차례 (Matcher의 AI가 말함)
     io.to(roomId).emit('screening_typing', true);
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    await new Promise(resolve => setTimeout(resolve, 500)); // 지연 시간 단축
     
-    const aiReply = await callAI(
-      currentListener.nickname, 
-      currentSpeaker.profile, 
-      currentSpeaker.profile?.objective || "친절하게 대화해.",
-      room.history[currentSpeaker.id]
+    // 생성과 번역을 동시에 수행
+    const aiData = await callAIWithTranslation(
+      waiter.nickname, 
+      matcher.profile, 
+      getLangName(waiter.profile.lang),
+      matcher.profile?.objective || "친절하게 대화해.",
+      room.history[matcher.id]
     );
     
     if (!rooms[roomId]) break;
-    const translatedForWaiter = await translateWithAI(aiReply, matcher.profile.lang, waiter.profile.lang);
     io.to(roomId).emit('screening_typing', false);
     
-    matcher.emit('screening_msg', { from: 'me', text: aiReply });
-    waiter.emit('screening_msg', { from: 'ai', text: translatedForWaiter, original: aiReply });
+    matcher.emit('screening_msg', { from: 'me', text: aiData.reply });
+    waiter.emit('screening_msg', { from: 'ai', text: aiData.translation, original: aiData.reply });
     
-    room.history[matcher.id].push({ role: 'assistant', content: aiReply });
-    room.history[waiter.id].push({ role: 'user', content: translatedForWaiter });
+    room.history[matcher.id].push({ role: 'assistant', content: aiData.reply });
+    room.history[waiter.id].push({ role: 'user', content: aiData.translation });
 
     // 2. 사람 차례 (Waiter가 직접 입력해야 함)
     if (!rooms[roomId]) break;
