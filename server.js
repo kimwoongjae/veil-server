@@ -188,7 +188,6 @@ Score: [Number only, 0-100]
       { role: 'user', content: `Chat Log:\n${chatScript}\n\nProvide the report now:` }
     ];
 
-    let result = await fetchFromAI(messages);
     result = result.trim();
     
     let summary = "상대방은 대화를 즐겁게 이어나가는 긍정적인 성격으로 보입니다.";
@@ -206,40 +205,26 @@ Score: [Number only, 0-100]
   }
 }
 
-// --- AI vs AI 자동 스크리닝 오케스트레이터 ---
-async function startAutonomousScreening(roomId, userA, userB) {
+// --- AI vs Human 인터랙티브 스크리닝 오케스트레이터 ---
+const pendingReplies = {}; // { roomId: resolveFunction }
+
+async function startInteractiveScreening(roomId, matcher, waiter) {
   const room = rooms[roomId];
   if (!room) return;
   
-  console.log(`🍿 [관전 모드 시작] ${userA.nickname}(${userA.profile.lang}) vs ${userB.nickname}(${userB.profile.lang})`);
+  console.log(`🍿 [인터랙티브 스크리닝] AI(${matcher.nickname}) -> Human(${waiter.nickname})`);
   
-  // 초기 인사 설정 (각자의 모국어로 생성)
-  let initialGreetingA = "안녕하세요! 반가워요ㅋㅋ";
-  let initialGreetingB = "안녕하세요! 반가워요ㅋㅋ";
-  
-  if (userA.profile.lang !== 'ko') initialGreetingA = await translateWithAI(initialGreetingA, 'ko', userA.profile.lang);
-  if (userB.profile.lang !== 'ko') initialGreetingB = await translateWithAI(initialGreetingB, 'ko', userB.profile.lang);
-
-  // User A가 보낸 것으로 처리
-  const translatedForB = await translateWithAI(initialGreetingA, userA.profile.lang, userB.profile.lang);
-  
-  userA.emit('screening_msg', { from: 'me', text: initialGreetingA });
-  userB.emit('screening_msg', { from: 'ai', text: translatedForB, original: initialGreetingA });
-  
-  room.history[userA.id].push({ role: 'assistant', content: initialGreetingA });
-  room.history[userB.id].push({ role: 'user', content: translatedForB });
-  
-  let currentSpeaker = userB;
-  let currentListener = userA;
-  const MAX_TURNS = 5; 
+  const MAX_TURNS = 3; 
+  let currentSpeaker = matcher; // 처음은 항상 Matcher의 AI가 시작
+  let currentListener = waiter;
   
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     if (!rooms[roomId]) break;
 
+    // 1. AI 차례 (Matcher의 AI가 말함)
     io.to(roomId).emit('screening_typing', true);
     await new Promise(resolve => setTimeout(resolve, 1500));
     
-    // 현재 화자의 AI가 화자의 모국어로 대답을 생성
     const aiReply = await callAI(
       currentListener.nickname, 
       currentSpeaker.profile, 
@@ -248,21 +233,35 @@ async function startAutonomousScreening(roomId, userA, userB) {
     );
     
     if (!rooms[roomId]) break;
-    
-    // 생성된 대답을 청자의 모국어로 번역
-    const translatedReply = await translateWithAI(aiReply, currentSpeaker.profile.lang, currentListener.profile.lang);
-    
+    const translatedForWaiter = await translateWithAI(aiReply, matcher.profile.lang, waiter.profile.lang);
     io.to(roomId).emit('screening_typing', false);
     
-    // 메시지 전송
-    currentSpeaker.emit('screening_msg', { from: 'me', text: aiReply });
-    currentListener.emit('screening_msg', { from: 'ai', text: translatedReply, original: aiReply });
+    matcher.emit('screening_msg', { from: 'me', text: aiReply });
+    waiter.emit('screening_msg', { from: 'ai', text: translatedForWaiter, original: aiReply });
     
-    // 히스토리 업데이트 (각자의 모국어로 저장)
-    room.history[currentSpeaker.id].push({ role: 'assistant', content: aiReply });
-    room.history[currentListener.id].push({ role: 'user', content: translatedReply });
+    room.history[matcher.id].push({ role: 'assistant', content: aiReply });
+    room.history[waiter.id].push({ role: 'user', content: translatedForWaiter });
+
+    // 2. 사람 차례 (Waiter가 직접 입력해야 함)
+    if (!rooms[roomId]) break;
+    console.log(`⏳ [Wait for Human] Waiting for ${waiter.nickname}'s reply...`);
     
-    [currentSpeaker, currentListener] = [currentListener, currentSpeaker];
+    const humanReply = await new Promise((resolve) => {
+      pendingReplies[roomId] = resolve;
+      // 30초 타임아웃 (무한 대기 방지)
+      setTimeout(() => resolve("..."), 30000);
+    });
+    
+    delete pendingReplies[roomId];
+    if (!rooms[roomId]) break;
+
+    const translatedForMatcher = await translateWithAI(humanReply, waiter.profile.lang, matcher.profile.lang);
+    
+    waiter.emit('screening_msg', { from: 'me', text: humanReply });
+    matcher.emit('screening_msg', { from: 'ai', text: translatedForMatcher, original: humanReply });
+
+    room.history[waiter.id].push({ role: 'assistant', content: humanReply });
+    room.history[matcher.id].push({ role: 'user', content: translatedForMatcher });
   }
   
   if (!rooms[roomId]) return;
@@ -271,15 +270,16 @@ async function startAutonomousScreening(roomId, userA, userB) {
   io.to(roomId).emit('screening_typing', true);
   
   const [reportA, reportB] = await Promise.all([
-    generateReport(room.history[userA.id], userA.profile.lang),
-    generateReport(room.history[userB.id], userB.profile.lang)
+    generateReport(room.history[matcher.id], matcher.profile.lang),
+    generateReport(room.history[waiter.id], waiter.profile.lang)
   ]);
   
   io.to(roomId).emit('screening_typing', false);
   
-  userA.emit('report_ready', { partnerNickname: userB.nickname, report: reportA });
-  userB.emit('report_ready', { partnerNickname: userA.nickname, report: reportB });
+  matcher.emit('report_ready', { partnerNickname: waiter.nickname, report: reportA });
+  waiter.emit('report_ready', { partnerNickname: matcher.nickname, report: reportB });
 }
+
 
 let waitingQueue = []; // { id, nickname, profile, socket }
 const rooms = {};
@@ -287,37 +287,36 @@ const rooms = {};
 io.on('connection', (socket) => {
   console.log('✅ 새 사용자 접속:', socket.id);
 
-  // --- 1. 매칭 대기열 합류 ---
+  // --- 1. 매칭 대기열 합류 (Matcher vs Waiter 분리) ---
   socket.on('join_queue', (data) => {
     socket.nickname = data.nickname;
     socket.profile = data.profile || { lang: 'ko' };
+    socket.role = data.role; // 'matcher' 또는 'waiter'
     
-    if (waitingQueue.length > 0) {
-      const partner = waitingQueue.shift();
-      if (partner.id === socket.id) {
-        waitingQueue.push(socket);
-        return;
+    if (socket.role === 'matcher') {
+      // 1-1. Matcher: 대기열에서 Waiter를 찾음
+      const waiter = waitingQueue.find(u => u.role === 'waiter');
+      if (waiter) {
+        waitingQueue = waitingQueue.filter(u => u.id !== waiter.id);
+        console.log(`🤝 [Match Found] Matcher(${socket.nickname}) -> Waiter(${waiter.nickname})`);
+        
+        waiter.emit('incoming_match', {
+          fromId: socket.id,
+          fromNickname: socket.nickname,
+          fromProfile: socket.profile
+        });
+        socket.emit('match_waiting', { partnerNickname: waiter.nickname });
+        
+        socket.pendingPartner = waiter;
+        waiter.pendingPartner = socket;
+      } else {
+        socket.emit('error_msg', '대기 중인 사용자가 없습니다. 잠시 후 다시 시도해 주세요.');
       }
-
-      console.log(`🤝 [Match Found] ${socket.nickname} <-> ${partner.nickname}`);
-      
-      // 파트너(먼저 기다리던 사람)에게 매칭 요청 알림
-      partner.emit('incoming_match', {
-        fromId: socket.id,
-        fromNickname: socket.nickname,
-        fromProfile: socket.profile
-      });
-
-      // 요청자(방금 누른 사람)에게는 대기 상태 전달
-      socket.emit('match_waiting', { partnerNickname: partner.nickname });
-      
-      // 임시 매칭 데이터 저장 (수락 대기용)
-      socket.pendingPartner = partner;
-      partner.pendingPartner = socket;
     } else {
+      // 1-2. Waiter: 대기열에 들어감
       waitingQueue.push(socket);
       socket.emit('waiting');
-      console.log(`⏳ [Queue] ${socket.nickname} is waiting...`);
+      console.log(`⏳ [Queue] Waiter ${socket.nickname} is waiting...`);
     }
   });
 
@@ -327,9 +326,7 @@ io.on('connection', (socket) => {
     if (!partner) return;
 
     if (data.accepted) {
-      console.log(`✅ [Match Accepted] ${socket.nickname} accepted ${partner.nickname}`);
       const roomId = `room_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-      
       rooms[roomId] = {
         users: [partner, socket],
         history: { [partner.id]: [], [socket.id]: [] },
@@ -344,13 +341,21 @@ io.on('connection', (socket) => {
       });
 
       io.to(roomId).emit('matched', { roomId });
-      startAutonomousScreening(roomId, partner, socket);
+      // 항상 matcher가 먼저 시작하므로 역할을 구분하여 전달
+      const matcher = partner.role === 'matcher' ? partner : socket;
+      const waiter = partner.role === 'waiter' ? partner : socket;
+      startInteractiveScreening(roomId, matcher, waiter);
     } else {
-      console.log(`❌ [Match Declined] ${socket.nickname} declined`);
       partner.emit('match_declined');
       delete socket.pendingPartner;
       delete partner.pendingPartner;
-      // 거절한 사람은 다시 큐에 넣거나 메인으로 보냄 (클라이언트에서 처리)
+    }
+  });
+
+  // --- 3. 스크리닝 중 사람의 답변 전달 ---
+  socket.on('screening_reply', ({ roomId, text }) => {
+    if (pendingReplies[roomId]) {
+      pendingReplies[roomId](text);
     }
   });
 
