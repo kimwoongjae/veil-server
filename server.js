@@ -145,21 +145,34 @@ async function generateReport(history, myLangCode) {
   
   try {
     const messages = [
-      { role: 'system', content: `You are a psychologist analyzing a chat log. Summarize the Opponent's personality and conversational style in 3 short sentences.
-CRITICAL RULE: You MUST write your summary ENTIRELY in ${myLang}. Do NOT use English.` },
-      { role: 'user', content: `Chat Log:\n${chatScript}\n\nProvide the summary now:` }
+      { role: 'system', content: `You are a psychologist and relationship expert analyzing a chat log for a dating app.
+Summarize the Opponent's personality and conversational style in 3 short sentences.
+Also, provide a Compatibility Score (0-100) based on how well the two speakers seem to get along, their shared interests, and tone.
+
+CRITICAL RULES:
+1. You MUST write your summary ENTIRELY in ${myLang}.
+2. You MUST return the result in EXACTLY this format:
+Summary: [Your summary here]
+Score: [Number only, 0-100]
+` },
+      { role: 'user', content: `Chat Log:\n${chatScript}\n\nProvide the report now:` }
     ];
 
     let result = await fetchFromAI(messages);
     result = result.trim();
     
-    // 간혹 AI가 응답을 따옴표로 감싸거나 비정상적인 따옴표 뭉치를 보내는 경우 정제
-    result = result.replace(/^"+|"+$/g, '').trim();
-    if (!result) result = "상대방은 대화를 즐겁게 이어나가는 긍정적인 성격으로 보입니다.";
+    let summary = "상대방은 대화를 즐겁게 이어나가는 긍정적인 성격으로 보입니다.";
+    let score = 75;
+
+    const summaryMatch = result.match(/Summary:\s*([\s\S]+?)(?=\nScore:|$)/i);
+    const scoreMatch = result.match(/Score:\s*(\d+)/i);
+
+    if (summaryMatch) summary = summaryMatch[1].trim().replace(/^"+|"+$/g, '');
+    if (scoreMatch) score = parseInt(scoreMatch[1]);
     
-    return result;
+    return { summary, score };
   } catch (e) {
-    return "상대방은 대화를 즐겁게 이어나가는 긍정적인 성격으로 보입니다.";
+    return { summary: "상대방은 대화를 즐겁게 이어나가는 긍정적인 성격으로 보입니다.", score: 70 };
   }
 }
 
@@ -227,7 +240,6 @@ async function startAutonomousScreening(roomId, userA, userB) {
   console.log(`📝 [리포트 생성 시작] ${roomId}`);
   io.to(roomId).emit('screening_typing', true);
   
-  // 리포트도 각자의 모국어로 생성
   const [reportA, reportB] = await Promise.all([
     generateReport(room.history[userA.id], userA.profile.lang),
     generateReport(room.history[userB.id], userB.profile.lang)
@@ -235,8 +247,8 @@ async function startAutonomousScreening(roomId, userA, userB) {
   
   io.to(roomId).emit('screening_typing', false);
   
-  userA.emit('report_ready', { partnerNickname: userB.nickname, report: { summary: reportA } });
-  userB.emit('report_ready', { partnerNickname: userA.nickname, report: { summary: reportB } });
+  userA.emit('report_ready', { partnerNickname: userB.nickname, report: reportA });
+  userB.emit('report_ready', { partnerNickname: userA.nickname, report: reportB });
 }
 
 let waitingQueue = [];
