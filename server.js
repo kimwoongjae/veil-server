@@ -293,6 +293,7 @@ io.on('connection', (socket) => {
       rooms[roomId] = {
         users: [socket, partner],
         history: { [socket.id]: [], [partner.id]: [] },
+        realHistory: [], // 실제 채팅 내역 저장용
         accepted: { [socket.id]: false, [partner.id]: false }
       };
 
@@ -337,11 +338,49 @@ io.on('connection', (socket) => {
         translatedText = await translateWithAI(text, socket.profile.lang, partner.profile.lang);
     }
 
+    // 서버에 실제 대화 내역 저장 (AI 도움말용)
+    room.realHistory.push({ role: 'user', name: socket.nickname, content: text, lang: socket.profile.lang });
+
     socket.to(roomId).emit('chat_msg', { 
         from: socket.nickname, 
         text: translatedText,
         original: (translatedText !== text) ? text : null
     });
+  });
+
+  // --- AI 답변 도우미 ---
+  socket.on('ask_ai_help', async ({ roomId }) => {
+    const room = rooms[roomId];
+    if (!room) return;
+
+    console.log(`✨ [AI 도우미 요청] Room: ${roomId}, User: ${socket.nickname}`);
+    
+    try {
+      const myLang = getLangName(socket.profile.lang);
+      const chatScript = room.realHistory.map(m => `${m.name}: ${m.content}`).join('\n');
+      
+      const messages = [
+        { 
+          role: 'system', 
+          content: `You are an AI wingman helping '${socket.nickname}' chat with a partner.
+Based on the following chat history and '${socket.nickname}''s profile, suggest ONE natural, engaging next message (response or a question) in ${myLang}.
+
+Profile: ${JSON.stringify(socket.profile)}
+
+CRITICAL RULES:
+1. Output ONLY the suggested text in ${myLang}. No quotes, no explanations.
+2. Make it sound casual and natural for a 20-30 year old.
+3. If there's no history yet, suggest a friendly icebreaker.` 
+        },
+        { role: 'user', content: `Chat History:\n${chatScript}\n\nSuggest a message now:` }
+      ];
+
+      const suggestion = await fetchFromAI(messages);
+      socket.emit('ai_suggestion', { text: suggestion.trim().replace(/^"+|"+$/g, '') });
+    } catch (e) {
+      console.log("❌ [AI 도움 에러]:", e.message);
+      socket.emit('ai_suggestion', { text: "음... 뭐라고 하면 좋을까?" });
+    }
   });
   socket.on('leave_chat', ({ roomId }) => {
     socket.to(roomId).emit('chat_ended');
