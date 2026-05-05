@@ -195,7 +195,8 @@ Score: [Number only, 0-100]
       { role: 'user', content: `Chat Log:\n${chatScript}\n\nProvide the report now:` }
     ];
 
-    result = result.trim();
+    const resultRaw = await fetchFromAI(messages);
+    const result = resultRaw.trim();
     
     let summary = "상대방은 대화를 즐겁게 이어나가는 긍정적인 성격으로 보입니다.";
     let score = 75;
@@ -208,6 +209,7 @@ Score: [Number only, 0-100]
     
     return { summary, score };
   } catch (e) {
+    console.error("❌ [Report Gen Error]:", e.message);
     return { summary: "상대방은 대화를 즐겁게 이어나가는 긍정적인 성격으로 보입니다.", score: 70 };
   }
 }
@@ -289,8 +291,35 @@ async function startInteractiveScreening(roomId, matcher, waiter) {
 }
 
 
-let waitingQueue = []; // { id, nickname, profile, socket }
+// --- 매칭 대기열 및 룸 관리 ---
+let waitingQueue = []; 
 const rooms = {};
+
+// --- 매칭 로직 (전역 관리) ---
+function tryMatch() {
+  const matcher = waitingQueue.find(u => u.role === 'matcher' && !u.pendingPartner);
+  const waiter = waitingQueue.find(u => u.role === 'waiter' && !u.pendingPartner);
+
+  console.log(`🔍 [Matching Check] In Queue: ${waitingQueue.length} (Matchers: ${waitingQueue.filter(u=>u.role==='matcher').length}, Waiters: ${waitingQueue.filter(u=>u.role==='waiter').length})`);
+
+  if (matcher && waiter) {
+    // 큐에서 제거
+    waitingQueue = waitingQueue.filter(u => u.id !== matcher.id && u.id !== waiter.id);
+    
+    console.log(`🤝 [Match Success] Matcher(${matcher.nickname}) <-> Waiter(${waiter.nickname})`);
+    
+    matcher.pendingPartner = waiter;
+    waiter.pendingPartner = matcher;
+
+    // 파트너 정보 교환 및 수락 대기 상태 진입
+    waiter.emit('incoming_match', {
+      fromId: matcher.id,
+      fromNickname: matcher.nickname,
+      fromProfile: matcher.profile
+    });
+    matcher.emit('match_waiting', { partnerNickname: waiter.nickname });
+  }
+}
 
 io.on('connection', (socket) => {
   console.log('✅ 새 사용자 접속:', socket.id);
@@ -300,40 +329,17 @@ io.on('connection', (socket) => {
     socket.nickname = data.nickname;
     socket.profile = data.profile || { lang: 'ko' };
     socket.role = data.role; // 'matcher' 또는 'waiter'
+    socket.pendingPartner = null; // 초기화
     
     // 이미 큐에 있다면 제거 후 다시 삽입 (중복 방지)
     waitingQueue = waitingQueue.filter(u => u.id !== socket.id);
     waitingQueue.push(socket);
     
-    console.log(`⏳ [Queue] ${socket.role.toUpperCase()} ${socket.nickname} joined. Total in queue: ${waitingQueue.length}`);
+    console.log(`⏳ [Queue Join] ${socket.role.toUpperCase()} | ${socket.nickname} | Total: ${waitingQueue.length}`);
     
     // 매칭 시도
     tryMatch();
   });
-
-  // --- 매칭 로직 분리 (재사용 가능) ---
-  function tryMatch() {
-    const matcher = waitingQueue.find(u => u.role === 'matcher');
-    const waiter = waitingQueue.find(u => u.role === 'waiter');
-
-    if (matcher && waiter) {
-      // 큐에서 제거
-      waitingQueue = waitingQueue.filter(u => u.id !== matcher.id && u.id !== waiter.id);
-      
-      console.log(`🤝 [Match Success] Matcher(${matcher.nickname}) <-> Waiter(${waiter.nickname})`);
-      
-      // 파트너 정보 교환 및 수락 대기 상태 진입
-      waiter.emit('incoming_match', {
-        fromId: matcher.id,
-        fromNickname: matcher.nickname,
-        fromProfile: matcher.profile
-      });
-      matcher.emit('match_waiting', { partnerNickname: waiter.nickname });
-      
-      matcher.pendingPartner = waiter;
-      waiter.pendingPartner = matcher;
-    }
-  }
 
   // --- 2. 매칭 수락/거절 ---
   socket.on('respond_match', (data) => {
