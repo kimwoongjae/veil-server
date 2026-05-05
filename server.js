@@ -331,8 +331,25 @@ const rooms = {};
 
 // --- 매칭 로직 (전역 관리) ---
 function tryMatch() {
-  const matcher = waitingQueue.find(u => u.role === 'matcher' && !u.pendingPartner);
-  const waiter = waitingQueue.find(u => u.role === 'waiter' && !u.pendingPartner);
+  // 1. 최우선: Matcher + Waiter 조합 찾기
+  let matcher = waitingQueue.find(u => u.role === 'matcher' && !u.pendingPartner);
+  let waiter = waitingQueue.find(u => u.role === 'waiter' && !u.pendingPartner);
+
+  // 2. 차선: Waiter가 없으면 Matcher + Matcher 조합이라도 매칭 (유연성)
+  if (matcher && !waiter) {
+    waiter = waitingQueue.find(u => u.role === 'matcher' && u.id !== matcher.id && !u.pendingPartner);
+    if (waiter) {
+      console.log(`🔄 [Flexible Match] No waiters found. Matching two Matchers: ${matcher.nickname} & ${waiter.nickname}`);
+    }
+  }
+
+  // 3. 차선: Matcher가 없으면 Waiter + Waiter 조합이라도 매칭
+  if (!matcher && waiter) {
+    matcher = waitingQueue.find(u => u.role === 'waiter' && u.id !== waiter.id && !u.pendingPartner);
+    if (matcher) {
+      console.log(`🔄 [Flexible Match] No matchers found. Matching two Waiters: ${matcher.nickname} & ${waiter.nickname}`);
+    }
+  }
 
   console.log(`🔍 [Matching Check] In Queue: ${waitingQueue.length} (Matchers: ${waitingQueue.filter(u=>u.role==='matcher').length}, Waiters: ${waitingQueue.filter(u=>u.role==='waiter').length})`);
 
@@ -340,7 +357,7 @@ function tryMatch() {
     // 큐에서 제거
     waitingQueue = waitingQueue.filter(u => u.id !== matcher.id && u.id !== waiter.id);
     
-    console.log(`🤝 [Match Success] Matcher(${matcher.nickname}) <-> Waiter(${waiter.nickname})`);
+    console.log(`🤝 [Match Success] ${matcher.nickname}(${matcher.role}) <-> ${waiter.nickname}(${waiter.role})`);
     
     matcher.pendingPartner = waiter;
     waiter.pendingPartner = matcher;
