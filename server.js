@@ -16,11 +16,11 @@ const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
 const CF_API_TOKEN  = process.env.CF_API_TOKEN;
 // 글로벌 서비스 및 아시아 4개 국어(한/일/영/중)의 미묘한 뉘앙스 처리에 최적화된 최상위 모델군
 const CF_MODELS = [
-  '@cf/google/gemma-4-26b-a4b-it',     // 1순위: 사용자 요청 최신 젬마 모델 (번역 품질 우수)
-  '@cf/meta/llama-3.1-70b-instruct',   // 2순위: 70B 대형 모델 (복잡한 뉘앙스 및 상황 파악)
-  '@cf/meta/llama-4-scout-17b-16e-instruct', // 3순위: 차세대 Llama 4 Scout (고성능/고속)
-  '@cf/qwen/qwen1.5-7b-chat-awq',      // 백업: 아시아 언어 보조
-  '@cf/meta/llama-3.1-8b-instruct'     // 백업: 안정성 위주
+  '@cf/meta/llama-3.1-8b-instruct',          // 1순위: 초고속 응답 (실시간 채팅/번역 최적)
+  '@cf/meta/llama-3.1-70b-instruct',         // 2순위: 고정밀 분석/리포트용
+  '@cf/google/gemma-4-26b-a4b-it',           // 3순위
+  '@cf/meta/llama-4-scout-17b-16e-instruct', 
+  '@cf/qwen/qwen1.5-7b-chat-awq'
 ];
 
 // --- 공통 AI API 호출기 ---
@@ -458,29 +458,46 @@ io.on('connection', (socket) => {
   });
 
   // --- 실제 채팅 실시간 번역 ---
-  socket.on('chat_send', async ({ roomId, text }) => {
+  socket.on('chat_send', ({ roomId, text }) => {
     const room = rooms[roomId];
     if (!room) return;
 
     const partner = room.users.find(u => u.id !== socket.id);
+    if (!partner) return;
+
+    const msgId = `msg_${Date.now()}_${socket.id.substring(0, 4)}`;
+
+    // 1. 보낸 사람에게는 원본만 즉시 표시
+    socket.emit('chat_msg', { id: msgId, from: 'me', text });
+
+    // 2. 받는 사람에게도 원본을 즉시 전송 (지연 시간 최소화)
+    // 언어가 다를 경우 '번역 중' 상태를 함께 보낼 수 있음
+    const isDifferentLang = socket.profile.lang !== partner.profile.lang;
     
-    // 보낸 사람에게는 원본만 즉시 표시
-    socket.emit('chat_msg', { from: 'me', text });
+    partner.emit('chat_msg', { 
+        id: msgId,
+        from: socket.nickname, 
+        text: text, // 우선 원본 전송
+        isTranslating: isDifferentLang 
+    });
 
-    // 받는 사람에게는 번역된 텍스트와 원본을 함께 표시
-    let translatedText = text;
-    if (socket.profile.lang !== partner.profile.lang) {
-        translatedText = await translateWithAI(text, socket.profile.lang, partner.profile.lang);
-    }
-
-    // 서버에 실제 대화 내역 저장 (AI 도움말용)
+    // 서버에 실제 대화 내역 저장
     room.realHistory.push({ role: 'user', name: socket.nickname, content: text, lang: socket.profile.lang });
 
-    socket.to(roomId).emit('chat_msg', { 
-        from: socket.nickname, 
-        text: translatedText,
-        original: (translatedText !== text) ? text : null
-    });
+    // 3. 비동기 번역 시작 (기다리지 않음)
+    if (isDifferentLang) {
+        translateWithAI(text, socket.profile.lang, partner.profile.lang).then(translatedText => {
+            // 번역이 완료되면 해당 메시지만 업데이트
+            partner.emit('chat_update', {
+                id: msgId,
+                text: translatedText,
+                original: text
+            });
+        }).catch(err => {
+            console.error("Translation error:", err);
+            // 에러 시 업데이트 없음 (원본 유지)
+        });
+    }
   });
 
   // --- AI 답변 도우미 ---
