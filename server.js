@@ -234,23 +234,50 @@ async function startInteractiveScreening(roomId, matcher, waiter) {
     io.to(roomId).emit('screening_typing', true);
     await new Promise(resolve => setTimeout(resolve, 500)); // 지연 시간 단축
     
-    // 생성과 번역을 동시에 수행
-    const aiData = await callAIWithTranslation(
-      waiter.nickname, 
-      matcher.profile, 
-      getLangName(waiter.profile.lang),
-      matcher.profile?.objective || "친절하게 대화해.",
-      room.history[matcher.id]
-    );
+    const sameLang = matcher.profile.lang === waiter.profile.lang;
+    let aiData;
+
+    if (sameLang) {
+      // 같은 언어면 번역 없이 일반 대화 생성
+      const myLang = getLangName(matcher.profile.lang);
+      const messages = [
+        { 
+          role: 'system', 
+          content: `You are roleplaying as '${matcher.nickname}', chatting with '${waiter.nickname}'.
+Persona: ${JSON.stringify(matcher.profile)}
+Objective: "${matcher.profile?.objective || "친절하게 대화해."}"
+Rules:
+- Speak ONLY in ${myLang}.
+- Be casual and natural (1-2 sentences).
+- Output ONLY the response text.` 
+        },
+        ...room.history[matcher.id]
+      ];
+      const reply = await fetchFromAI(messages);
+      aiData = { reply: reply.trim(), translation: reply.trim() };
+    } else {
+      // 다른 언어면 번역 포함 생성
+      aiData = await callAIWithTranslation(
+        waiter.nickname, 
+        matcher.profile, 
+        getLangName(waiter.profile.lang),
+        matcher.profile?.objective || "친절하게 대화해.",
+        room.history[matcher.id]
+      );
+    }
     
     if (!rooms[roomId]) break;
     io.to(roomId).emit('screening_typing', false);
     
     matcher.emit('screening_msg', { from: 'me', text: aiData.reply });
-    waiter.emit('screening_msg', { from: 'ai', text: aiData.translation, original: aiData.reply });
+    waiter.emit('screening_msg', { 
+      from: 'ai', 
+      text: sameLang ? aiData.reply : aiData.translation, 
+      original: sameLang ? null : aiData.reply 
+    });
     
     room.history[matcher.id].push({ role: 'assistant', content: aiData.reply });
-    room.history[waiter.id].push({ role: 'user', content: aiData.translation });
+    room.history[waiter.id].push({ role: 'user', content: sameLang ? aiData.reply : aiData.translation });
 
     // 2. 사람 차례 (Waiter가 직접 입력해야 함)
     if (!rooms[roomId]) break;
@@ -259,16 +286,23 @@ async function startInteractiveScreening(roomId, matcher, waiter) {
     const humanReply = await new Promise((resolve) => {
       pendingReplies[roomId] = resolve;
       // 30초 타임아웃 (무한 대기 방지)
-      setTimeout(() => resolve("..."), 30000);
+      setTimeout(() => resolve("(No response)"), 60000); // 60초로 연장
     });
     
     delete pendingReplies[roomId];
     if (!rooms[roomId]) break;
 
-    const translatedForMatcher = await translateWithAI(humanReply, waiter.profile.lang, matcher.profile.lang);
+    const sameLangForHuman = waiter.profile.lang === matcher.profile.lang;
+    const translatedForMatcher = sameLangForHuman 
+      ? humanReply 
+      : await translateWithAI(humanReply, waiter.profile.lang, matcher.profile.lang);
     
     waiter.emit('screening_msg', { from: 'me', text: humanReply });
-    matcher.emit('screening_msg', { from: 'ai', text: translatedForMatcher, original: humanReply });
+    matcher.emit('screening_msg', { 
+      from: 'ai', 
+      text: translatedForMatcher, 
+      original: sameLangForHuman ? null : humanReply 
+    });
 
     room.history[waiter.id].push({ role: 'assistant', content: humanReply });
     room.history[matcher.id].push({ role: 'user', content: translatedForMatcher });
