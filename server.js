@@ -534,7 +534,7 @@ function startMatchedRoom(userA, userB) {
   const bothUseAI = userA.role === 'matcher' && userB.role === 'matcher';
   const mixedMode = userA.role !== userB.role;
   const screeningMode = bothUseAI ? 'ai-ai' : (mixedMode ? 'ai-human' : 'human-human');
-  room.screeningMode = screeningMode;
+  rooms[roomId].screeningMode = screeningMode;
   io.to(roomId).emit('matched', { roomId, screeningMode });
 
   if (bothUseAI) {
