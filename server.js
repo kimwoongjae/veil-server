@@ -250,116 +250,96 @@ Score: [Number only, 0-100]
   }
 }
 
-// --- AI vs Human 인터랙티브 스크리닝 오케스트레이터 ---
-const pendingReplies = {}; // { roomId: resolveFunction }
-
+// --- AI vs AI 자동 스크리닝 오케스트레이터 ---
 async function startInteractiveScreening(roomId, matcher, waiter) {
   const room = rooms[roomId];
   if (!room) return;
-  
-  console.log(`🍿 [인터랙티브 스크리닝] AI(${matcher.nickname}) -> Human(${waiter.nickname})`);
-  
-  const MAX_TURNS = 3; 
-  let currentSpeaker = matcher; // 처음은 항상 Matcher의 AI가 시작
-  let currentListener = waiter;
-  
-  for (let turn = 0; turn < MAX_TURNS; turn++) {
+
+  console.log(`🍿 [AI 자동 스크리닝] ${matcher.nickname} AI <-> ${waiter.nickname} AI`);
+
+  // 기존 3회 왕복과 같은 분량: 양쪽 AI가 번갈아 총 6개 메시지 생성
+  const TOTAL_MESSAGES = 6;
+  let speaker = matcher;
+  let listener = waiter;
+
+  for (let turn = 0; turn < TOTAL_MESSAGES; turn++) {
     if (!rooms[roomId]) break;
 
-    // 1. AI 차례 (Matcher의 AI가 말함)
     io.to(roomId).emit('screening_typing', true);
-    await new Promise(resolve => setTimeout(resolve, 500)); // 지연 시간 단축
-    
-    const sameLang = matcher.profile.lang === waiter.profile.lang;
+
+    const sameLang = speaker.profile.lang === listener.profile.lang;
     let aiData;
 
     if (sameLang) {
-      // 같은 언어면 번역 없이 일반 대화 생성
-      const myLang = getLangName(matcher.profile.lang);
+      const speakerLang = getLangName(speaker.profile.lang);
       const messages = [
-        { 
-          role: 'system', 
-          content: `You are roleplaying as '${matcher.nickname}', chatting with '${waiter.nickname}'.
-Persona: ${JSON.stringify(matcher.profile)}
-Objective: "${matcher.profile?.objective || "친절하게 대화해."}"
+        {
+          role: 'system',
+          content: `You are the AI assistant of '${speaker.nickname}', having a short screening conversation with the AI assistant of '${listener.nickname}'.
+Persona: ${JSON.stringify(speaker.profile)}
+Objective: "${speaker.profile?.objective || '친절하게 대화해.'}"
 Rules:
-- Speak ONLY in ${myLang}.
-- Be casual and natural (1-2 sentences).
-- Output ONLY the response text.` 
+- Speak ONLY in ${speakerLang}.
+- Reply naturally to the latest message and help the conversation progress.
+- Use only 1 short sentence.
+- Do not repeat a question that was already asked.
+- Do not invent facts about either person.
+- Output ONLY the message text.`
         },
-        ...room.history[matcher.id]
+        ...room.history[speaker.id]
       ];
-      const reply = await fetchFromAI(messages);
-      aiData = { reply: reply.trim(), translation: reply.trim() };
+      const reply = (await fetchFromAI(messages)).trim();
+      aiData = { reply, translation: reply };
     } else {
-      // 다른 언어면 번역 포함 생성
       aiData = await callAIWithTranslation(
-        waiter.nickname, 
-        matcher.profile, 
-        waiter.profile.lang,
-        matcher.profile?.objective || "친절하게 대화해.",
-        room.history[matcher.id]
+        listener.nickname,
+        { ...speaker.profile, nickname: speaker.nickname },
+        listener.profile.lang,
+        speaker.profile?.objective || '친절하게 대화해.',
+        room.history[speaker.id]
       );
     }
-    
+
     if (!rooms[roomId]) break;
+
     io.to(roomId).emit('screening_typing', false);
-    
-    matcher.emit('screening_msg', { from: 'me', text: aiData.reply });
-    waiter.emit('screening_msg', { 
-      from: 'ai', 
-      text: sameLang ? aiData.reply : aiData.translation, 
-      original: sameLang ? null : aiData.reply 
-    });
-    
-    room.history[matcher.id].push({ role: 'assistant', content: aiData.reply });
-    room.history[waiter.id].push({ role: 'user', content: sameLang ? aiData.reply : aiData.translation });
 
-    // 2. 사람 차례 (Waiter가 직접 입력해야 함)
-    if (!rooms[roomId]) break;
-    console.log(`⏳ [Wait for Human] Waiting for ${waiter.nickname}'s reply...`);
-    
-    const humanReply = await new Promise((resolve) => {
-      pendingReplies[roomId] = resolve;
-      // 30초 타임아웃 (무한 대기 방지)
-      setTimeout(() => resolve("(No response)"), 60000); // 60초로 연장
+    // 말한 사람에게는 자신의 AI 메시지, 상대에게는 상대방 AI 메시지로 표시
+    speaker.emit('screening_msg', {
+      from: 'me',
+      text: aiData.reply
     });
-    
-    delete pendingReplies[roomId];
-    if (!rooms[roomId]) break;
-
-    const sameLangForHuman = waiter.profile.lang === matcher.profile.lang;
-    const translatedForMatcher = sameLangForHuman 
-      ? humanReply 
-      : await translateWithAI(humanReply, waiter.profile.lang, matcher.profile.lang);
-    
-    waiter.emit('screening_msg', { from: 'me', text: humanReply });
-    matcher.emit('screening_msg', { 
-      from: 'ai', 
-      text: translatedForMatcher, 
-      original: sameLangForHuman ? null : humanReply 
+    listener.emit('screening_msg', {
+      from: 'ai',
+      text: sameLang ? aiData.reply : aiData.translation,
+      original: sameLang ? null : aiData.reply
     });
 
-    room.history[waiter.id].push({ role: 'assistant', content: humanReply });
-    room.history[matcher.id].push({ role: 'user', content: translatedForMatcher });
+    room.history[speaker.id].push({ role: 'assistant', content: aiData.reply });
+    room.history[listener.id].push({
+      role: 'user',
+      content: sameLang ? aiData.reply : aiData.translation
+    });
+
+    // 다음 메시지는 상대방 AI가 즉시 생성
+    [speaker, listener] = [listener, speaker];
   }
-  
+
   if (!rooms[roomId]) return;
-  
+
   console.log(`📝 [리포트 생성 시작] ${roomId}`);
   io.to(roomId).emit('screening_typing', true);
-  
+
   const [reportA, reportB] = await Promise.all([
     generateReport(room.history[matcher.id], matcher.profile.lang),
     generateReport(room.history[waiter.id], waiter.profile.lang)
   ]);
-  
+
   io.to(roomId).emit('screening_typing', false);
-  
+
   matcher.emit('report_ready', { partnerNickname: waiter.nickname, report: reportA });
   waiter.emit('report_ready', { partnerNickname: matcher.nickname, report: reportB });
 }
-
 
 // --- 매칭 대기열 및 룸 관리 ---
 let waitingQueue = []; 
@@ -460,12 +440,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // --- 3. 스크리닝 중 사람의 답변 전달 ---
-  socket.on('screening_reply', ({ roomId, text }) => {
-    if (pendingReplies[roomId]) {
-      pendingReplies[roomId](text);
-    }
-  });
 
   socket.on('accept_chat', ({ roomId }) => {
     const room = rooms[roomId];
