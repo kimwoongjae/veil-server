@@ -211,45 +211,62 @@ Rules:
   }
 }
 
-// --- 분석 보고서 생성 함수 ---
-async function generateReport(history, myLangCode) {
-  const myLang = getLangName(myLangCode);
-  const chatScript = history.map(m => `${m.role === 'assistant' ? 'Me' : 'Opponent'}: ${m.content}`).join('\n');
-  
+// --- AI 대화 기반 공통 분석 보고서 생성 ---
+async function generateReport(history) {
+  const chatScript = history
+    .filter(m => m && m.content && m.content.trim())
+    .map(m => `${m.role === 'assistant' ? 'Assistant A' : 'Assistant B'}: ${m.content.trim()}`)
+    .join('\n');
+
+  const fallback = {
+    summary: 'The AI assistants exchanged a short conversation, but there is not enough evidence yet to make a confident judgment. Treat this as a preliminary impression rather than a conclusion about either person.',
+    score: 50
+  };
+
+  if (!chatScript) return fallback;
+
   try {
     const messages = [
-      { role: 'system', content: `You are a psychologist and relationship expert analyzing a chat log for a dating app.
-Summarize the Opponent's personality and conversational style in 3 short sentences.
-Also, provide a Compatibility Score (0-100) based on how well the two speakers seem to get along, their shared interests, and tone.
+      {
+        role: 'system',
+        content: `You evaluate a short conversation between two AI assistants acting on behalf of users in a social matching app.
+This is NOT a direct conversation between the users, so all conclusions must be tentative and evidence-based.
 
-CRITICAL RULES:
-1. You MUST write your summary ENTIRELY in ${myLang}.
-2. You MUST return the result in EXACTLY this format:
-Summary: [Your summary here]
-Score: [Number only, 0-100]
-` },
-      { role: 'user', content: `Chat Log:\n${chatScript}\n\nProvide the report now:` }
+Write a neutral compatibility report in English using 2 or 3 concise sentences, followed by one integer score.
+Mention at least one concrete topic or interaction visible in the transcript. Do not invent personality traits, feelings, intentions, or shared interests that are not supported by the transcript.
+
+SCORING RUBRIC:
+- 50: neutral or insufficient evidence
+- 60-69: some conversational potential
+- 70-79: good reciprocal engagement supported by clear evidence
+- 80-89: strong compatibility supported by several specific mutual signals
+- 90-100: exceptional and rare; use only with extensive, highly consistent evidence
+Reduce the score for generic exchanges, repetition, awkward replies, unanswered questions, or very little evidence.
+A short screening conversation should normally remain between 45 and 75.
+
+Return EXACTLY:
+Summary: [English summary]
+Score: [integer from 0 to 100]`
+      },
+      { role: 'user', content: `AI assistant conversation:\n${chatScript}` }
     ];
 
-    const resultRaw = await fetchFromAI(messages);
-    const result = resultRaw.trim();
-    
-    let summary = "상대방은 대화를 즐겁게 이어나가는 긍정적인 성격으로 보입니다.";
-    let score = 75;
-
+    const result = (await fetchFromAI(messages)).trim();
     const summaryMatch = result.match(/Summary:\s*([\s\S]+?)(?=\nScore:|$)/i);
-    const scoreMatch = result.match(/Score:\s*(\d+)/i);
+    const scoreMatch = result.match(/Score:\s*(\d{1,3})/i);
 
-    if (summaryMatch) summary = summaryMatch[1].trim().replace(/^"+|"+$/g, '');
-    if (scoreMatch) score = parseInt(scoreMatch[1]);
-    
+    if (!summaryMatch || !scoreMatch) return fallback;
+
+    const summary = summaryMatch[1].trim().replace(/^"+|"+$/g, '');
+    const score = Math.max(0, Math.min(100, Number.parseInt(scoreMatch[1], 10)));
+
+    if (!summary || !Number.isFinite(score)) return fallback;
     return { summary, score };
   } catch (e) {
-    console.error("❌ [Report Gen Error]:", e.message);
-    return { summary: "상대방은 대화를 즐겁게 이어나가는 긍정적인 성격으로 보입니다.", score: 70 };
+    console.error('❌ [Report Gen Error]:', e.message);
+    return fallback;
   }
 }
-
 // --- AI vs AI 자동 스크리닝 오케스트레이터 ---
 async function startInteractiveScreening(roomId, matcher, waiter) {
   const room = rooms[roomId];
@@ -330,10 +347,14 @@ Rules:
   console.log(`📝 [리포트 생성 시작] ${roomId}`);
   io.to(roomId).emit('screening_typing', true);
 
-  const [reportA, reportB] = await Promise.all([
-    generateReport(room.history[matcher.id], matcher.profile.lang),
-    generateReport(room.history[waiter.id], waiter.profile.lang)
+  // 동일한 대화를 한 번만 분석하여 두 사용자에게 같은 점수를 제공한다.
+  const sharedReport = await generateReport(room.history[matcher.id]);
+  const [summaryForMatcher, summaryForWaiter] = await Promise.all([
+    translateWithAI(sharedReport.summary, 'en', matcher.profile.lang),
+    translateWithAI(sharedReport.summary, 'en', waiter.profile.lang)
   ]);
+  const reportA = { summary: summaryForMatcher, score: sharedReport.score };
+  const reportB = { summary: summaryForWaiter, score: sharedReport.score };
 
   io.to(roomId).emit('screening_typing', false);
 
