@@ -53,6 +53,18 @@ const TRANSLATION_MODELS = [
   '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
 ];
 
+// 최근 번역을 재사용해 같은 문장의 응답 시간을 줄인다.
+const translationCache = new Map();
+const TRANSLATION_CACHE_LIMIT = 500;
+
+function saveTranslationCache(key, value) {
+  if (translationCache.size >= TRANSLATION_CACHE_LIMIT) {
+    const oldestKey = translationCache.keys().next().value;
+    translationCache.delete(oldestKey);
+  }
+  translationCache.set(key, value);
+}
+
 async function fetchTranslationFromAI(messages) {
   for (const model of TRANSLATION_MODELS) {
     const controller = new AbortController();
@@ -70,7 +82,7 @@ async function fetchTranslationFromAI(messages) {
         signal: controller.signal,
         body: JSON.stringify({
           messages,
-          max_tokens: 160,
+          max_tokens: 80,
           temperature: 0.1
         })
       });
@@ -133,6 +145,13 @@ function getLangName(code) {
 async function translateWithAI(text, fromCode, toCode) {
   if (fromCode === toCode || !text) return text;
 
+  const cacheKey = `${fromCode}|${toCode}|${text.trim()}`;
+  const cached = translationCache.get(cacheKey);
+  if (cached) {
+    console.log(`🚀 [번역 캐시] ${fromCode} -> ${toCode}`);
+    return cached;
+  }
+
   const fromLang = getLangName(fromCode);
   const toLang = getLangName(toCode);
 
@@ -140,30 +159,9 @@ async function translateWithAI(text, fromCode, toCode) {
     const messages = [
       {
         role: 'system',
-        content: `You are a professional Korean-Japanese multilingual translator for a casual one-to-one chat app.
-Translate the user's message from ${fromLang} to ${toLang}.
-
-TRANSLATION METHOD (perform silently):
-A. Determine the literal meaning, sentence type, omitted subject/object, relationship terms, and politeness level.
-B. Produce a natural chat sentence in ${toLang} without changing that meaning.
-C. Mentally translate your result back to ${fromLang}. If the meaning, subject, question, negation, or relationship changed, correct it before answering.
-
-STRICT RULES:
-1. Preserve exactly who does what to whom. Never invent a person, pronoun, relationship, reason, or context.
-2. Preserve question vs statement, positive vs negative, tense, uncertainty, names, places, numbers, emoji, and politeness.
-3. Translate the intended chat meaning, not word-by-word grammar, but never paraphrase into a different question.
-4. For Korean and Japanese, correctly resolve common omitted subjects and fixed social/relationship expressions.
-5. Use natural everyday chat in ${toLang}. Prefer one short sentence when the source is short.
-6. Never answer the message. Never add explanations, labels, alternatives, romanization, quotation marks, or source text.
-7. Output only the final translation.
-
-MEANING-SAFETY EXAMPLES:
-- Korean "남자친구 있어요?" -> Japanese "彼氏はいますか？" (not a question about somebody dating "him")
-- Korean "여자친구 있어요?" -> Japanese "彼女はいますか？"
-- Korean "일본어도 하세요?" -> Japanese "日本語も話せますか？" (language, not nationality)
-- Korean "한국 아이돌 좋아해요?" -> Japanese "韓国のアイドルは好きですか？"
-- Japanese "大阪に住んでるよ" -> Korean "오사카에 살고 있어요."
-- Japanese "彼氏いる？" -> Korean "남자친구 있어요?"`
+        content: `Translate this casual one-to-one chat from ${fromLang} to natural ${toLang}.
+Preserve exactly the meaning, speaker roles, omitted subject/object, relationship terms, question or negation, tone, politeness, names, numbers, places, and emoji. Never invent context or change the question. Use one short natural chat sentence. Silently check that translating your result back preserves the source meaning. Output only the translation; never answer, explain, label, quote, romanize, or show alternatives.
+Critical Korean/Japanese meanings: "남자친구 있어요?" = "彼氏はいますか？"; "여자친구 있어요?" = "彼女はいますか？"; "일본어도 하세요?" = "日本語も話せますか？"; "한국 아이돌 좋아해요?" = "韓国のアイドルは好きですか？"; "彼氏いる？" = "남자친구 있어요?".`
       },
       { role: 'user', content: text }
     ];
@@ -186,6 +184,7 @@ MEANING-SAFETY EXAMPLES:
       translated += '!';
     }
 
+    saveTranslationCache(cacheKey, translated);
     return translated;
   } catch (e) {
     console.error(
@@ -794,5 +793,6 @@ const PORT = process.env.PORT || 10000;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 서버 실행 중: ${PORT}`);
 });
+
 
 
