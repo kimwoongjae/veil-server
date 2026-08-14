@@ -48,8 +48,8 @@ async function fetchFromAI(messages) {
 
 // --- 짧은 실시간 채팅용 고속 번역 호출기 ---
 const TRANSLATION_MODELS = [
-  '@cf/meta/llama-3.1-8b-instruct-fp8-fast',
-  '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
+  '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+  '@cf/meta/llama-3.1-8b-instruct-fp8-fast'
 ];
 
 async function fetchTranslationFromAI(messages) {
@@ -139,15 +139,30 @@ async function translateWithAI(text, fromCode, toCode) {
     const messages = [
       {
         role: 'system',
-        content: `You are a high-accuracy translator for a casual one-to-one chat app.
+        content: `You are a professional Korean-Japanese multilingual translator for a casual one-to-one chat app.
 Translate the user's message from ${fromLang} to ${toLang}.
 
-RULES:
-1. Preserve the exact meaning, question intent, tone, politeness, names, numbers, and emoji.
-2. Use natural conversational ${toLang}; do not add, remove, answer, or explain anything.
-3. Resolve omitted subjects and objects from the words in the source, not by guessing a new topic.
-4. Distinguish nationality/person words from language words. For example, Korean "일본어도 하세요?" means "Can you speak Japanese too?", so in Japanese translate it as "日本語も話せますか？", never "日本人でも？".
-5. Output only the translation, with no quotation marks, labels, notes, or alternatives.`
+TRANSLATION METHOD (perform silently):
+A. Determine the literal meaning, sentence type, omitted subject/object, relationship terms, and politeness level.
+B. Produce a natural chat sentence in ${toLang} without changing that meaning.
+C. Mentally translate your result back to ${fromLang}. If the meaning, subject, question, negation, or relationship changed, correct it before answering.
+
+STRICT RULES:
+1. Preserve exactly who does what to whom. Never invent a person, pronoun, relationship, reason, or context.
+2. Preserve question vs statement, positive vs negative, tense, uncertainty, names, places, numbers, emoji, and politeness.
+3. Translate the intended chat meaning, not word-by-word grammar, but never paraphrase into a different question.
+4. For Korean and Japanese, correctly resolve common omitted subjects and fixed social/relationship expressions.
+5. Use natural everyday chat in ${toLang}. Prefer one short sentence when the source is short.
+6. Never answer the message. Never add explanations, labels, alternatives, romanization, quotation marks, or source text.
+7. Output only the final translation.
+
+MEANING-SAFETY EXAMPLES:
+- Korean "남자친구 있어요?" -> Japanese "彼氏はいますか？" (not a question about somebody dating "him")
+- Korean "여자친구 있어요?" -> Japanese "彼女はいますか？"
+- Korean "일본어도 하세요?" -> Japanese "日本語も話せますか？" (language, not nationality)
+- Korean "한국 아이돌 좋아해요?" -> Japanese "韓国のアイドルは好きですか？"
+- Japanese "大阪に住んでるよ" -> Korean "오사카에 살고 있어요."
+- Japanese "彼氏いる？" -> Korean "남자친구 있어요?"`
       },
       { role: 'user', content: text }
     ];
@@ -778,3 +793,4 @@ const PORT = process.env.PORT || 10000;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 서버 실행 중: ${PORT}`);
 });
+
