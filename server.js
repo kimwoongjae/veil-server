@@ -273,7 +273,7 @@ async function generateReport(history) {
     const messages = [
       {
         role: 'system',
-        content: `You evaluate a short conversation between two AI assistants acting on behalf of users in a social matching app.
+        content: `You evaluate a short screening conversation in a social matching app. One or both speakers may be AI assistants acting on behalf of users.
 This is NOT a direct conversation between the users, so all conclusions must be tentative and evidence-based.
 
 Write a neutral compatibility report in English using 2 or 3 concise sentences, followed by one integer score.
@@ -311,6 +311,32 @@ Score: [integer from 0 to 100]`
     return fallback;
   }
 }
+// 완료된 스크리닝을 한 번만 분석하고 각 사용자 언어로 전달
+async function finishScreeningReports(roomId, userA, userB) {
+  const room = rooms[roomId];
+  if (!room) return;
+
+  console.log(`📝 [리포트 생성 시작] ${roomId}`);
+  io.to(roomId).emit('screening_typing', true);
+
+  const sharedReport = await generateReport(room.history[userA.id]);
+  const [summaryForA, summaryForB] = await Promise.all([
+    translateWithAI(sharedReport.summary, 'en', userA.profile.lang),
+    translateWithAI(sharedReport.summary, 'en', userB.profile.lang)
+  ]);
+
+  if (!rooms[roomId]) return;
+  io.to(roomId).emit('screening_typing', false);
+  userA.emit('report_ready', {
+    partnerNickname: userB.nickname,
+    report: { summary: summaryForA, score: sharedReport.score }
+  });
+  userB.emit('report_ready', {
+    partnerNickname: userA.nickname,
+    report: { summary: summaryForB, score: sharedReport.score }
+  });
+}
+
 // --- AI vs AI 자동 스크리닝 오케스트레이터 ---
 async function startInteractiveScreening(roomId, matcher, waiter) {
   const room = rooms[roomId];
@@ -387,28 +413,105 @@ Rules:
   }
 
   if (!rooms[roomId]) return;
+  await finishScreeningReports(roomId, matcher, waiter);
+}
 
-  console.log(`📝 [리포트 생성 시작] ${roomId}`);
-  io.to(roomId).emit('screening_typing', true);
+// --- AI 대리 사용자와 직접 대화 사용자의 혼합 스크리닝 ---
+async function startMixedScreening(roomId, aiUser, humanUser) {
+  const room = rooms[roomId];
+  if (!room) return;
 
-  // 동일한 대화를 한 번만 분석하여 두 사용자에게 같은 점수를 제공한다.
-  const sharedReport = await generateReport(room.history[matcher.id]);
-  const [summaryForMatcher, summaryForWaiter] = await Promise.all([
-    translateWithAI(sharedReport.summary, 'en', matcher.profile.lang),
-    translateWithAI(sharedReport.summary, 'en', waiter.profile.lang)
-  ]);
-  const reportA = { summary: summaryForMatcher, score: sharedReport.score };
-  const reportB = { summary: summaryForWaiter, score: sharedReport.score };
+  console.log(`🤝 [혼합 스크리닝] ${aiUser.nickname} AI <-> ${humanUser.nickname} 본인`);
+  const TOTAL_AI_TURNS = 3;
 
-  io.to(roomId).emit('screening_typing', false);
+  for (let turn = 0; turn < TOTAL_AI_TURNS; turn++) {
+    if (!rooms[roomId]) return;
+    io.to(roomId).emit('screening_typing', true);
 
-  matcher.emit('report_ready', { partnerNickname: waiter.nickname, report: reportA });
-  waiter.emit('report_ready', { partnerNickname: matcher.nickname, report: reportB });
+    const sameLang = aiUser.profile.lang === humanUser.profile.lang;
+    let aiData;
+
+    if (sameLang) {
+      const aiLang = getLangName(aiUser.profile.lang);
+      const messages = [
+        {
+          role: 'system',
+          content: `You are the AI assistant of '${aiUser.nickname}', talking to '${humanUser.nickname}', who is replying personally.
+Persona: ${JSON.stringify(aiUser.profile)}
+Objective: "${aiUser.profile?.objective || '친절하게 대화해.'}"
+Rules:
+- Speak ONLY in ${aiLang}.
+- Reply naturally to the latest message.
+- Use only 1 short sentence.
+- Do not repeat an earlier question.
+- Do not invent facts.
+- Output ONLY the message text.`
+        },
+        ...room.history[aiUser.id]
+      ];
+      const reply = (await fetchFromAI(messages)).trim();
+      aiData = { reply, translation: reply };
+    } else {
+      aiData = await callAIWithTranslation(
+        humanUser.nickname,
+        { ...aiUser.profile, nickname: aiUser.nickname },
+        humanUser.profile.lang,
+        aiUser.profile?.objective || '친절하게 대화해.',
+        room.history[aiUser.id]
+      );
+    }
+
+    if (!rooms[roomId]) return;
+
+    room.history[aiUser.id].push({ role: 'assistant', content: aiData.reply });
+    room.history[humanUser.id].push({
+      role: 'user',
+      content: sameLang ? aiData.reply : aiData.translation
+    });
+
+    const humanReplyPromise = new Promise(resolve => {
+      pendingScreeningReplies.set(roomId, { humanId: humanUser.id, resolve });
+    });
+
+    io.to(roomId).emit('screening_typing', false);
+    aiUser.emit('screening_msg', { from: 'me', actor: 'ai', text: aiData.reply });
+    humanUser.emit('screening_msg', {
+      from: 'ai',
+      actor: 'ai',
+      text: sameLang ? aiData.reply : aiData.translation,
+      original: sameLang ? null : aiData.reply
+    });
+
+    const humanText = await humanReplyPromise;
+    pendingScreeningReplies.delete(roomId);
+    if (!humanText || !rooms[roomId]) return;
+
+    // 본인의 메시지는 즉시 표시하고, 상대 AI에게 전달할 번역만 처리한다.
+    humanUser.emit('screening_msg', { from: 'me', actor: 'human', text: humanText });
+    io.to(roomId).emit('screening_typing', true);
+    const translatedForAI = sameLang
+      ? humanText
+      : await translateWithAI(humanText, humanUser.profile.lang, aiUser.profile.lang);
+    io.to(roomId).emit('screening_typing', false);
+
+    aiUser.emit('screening_msg', {
+      from: 'ai',
+      actor: 'human',
+      text: translatedForAI,
+      original: sameLang ? null : humanText
+    });
+
+    room.history[humanUser.id].push({ role: 'assistant', content: humanText });
+    room.history[aiUser.id].push({ role: 'user', content: translatedForAI });
+  }
+
+  await finishScreeningReports(roomId, aiUser, humanUser);
 }
 
 // --- 매칭 대기열 및 룸 관리 ---
 let waitingQueue = []; 
 const rooms = {};
+const pendingScreeningReplies = new Map();
 
 // 두 사용자를 즉시 룸에 연결하고 AI 자동 스크리닝 시작
 function startMatchedRoom(userA, userB) {
@@ -428,12 +531,25 @@ function startMatchedRoom(userA, userB) {
     delete user.pendingPartner;
   });
 
-  io.to(roomId).emit('matched', { roomId });
+  const bothUseAI = userA.role === 'matcher' && userB.role === 'matcher';
+  const mixedMode = userA.role !== userB.role;
+  const screeningMode = bothUseAI ? 'ai-ai' : (mixedMode ? 'ai-human' : 'human-human');
+  room.screeningMode = screeningMode;
+  io.to(roomId).emit('matched', { roomId, screeningMode });
 
-  // 같은 역할끼리 매칭된 경우에도 두 사용자를 확실하게 구분
-  const matcher = userA.role === 'matcher' ? userA : userB;
-  const waiter = matcher.id === userA.id ? userB : userA;
-  startInteractiveScreening(roomId, matcher, waiter);
+  if (bothUseAI) {
+    startInteractiveScreening(roomId, userA, userB);
+  } else if (mixedMode) {
+    const aiUser = userA.role === 'matcher' ? userA : userB;
+    const humanUser = aiUser.id === userA.id ? userB : userA;
+    startMixedScreening(roomId, aiUser, humanUser);
+  } else {
+    // 두 명 모두 직접 대화를 선택한 경우 AI 스크리닝 없이 바로 연결한다.
+    room.accepted[userA.id] = true;
+    room.accepted[userB.id] = true;
+    userA.emit('chat_start', { partnerNickname: userB.nickname, history: [] });
+    userB.emit('chat_start', { partnerNickname: userA.nickname, history: [] });
+  }
 }
 // --- 매칭 로직 (전역 관리) ---
 function tryMatch() {
@@ -519,6 +635,16 @@ io.on('connection', (socket) => {
   });
 
 
+
+  // 혼합 스크리닝에서 직접 대화 사용자의 답변만 수락
+  socket.on('screening_reply', ({ roomId, text }) => {
+    const pending = pendingScreeningReplies.get(roomId);
+    const cleanText = String(text || '').trim();
+    if (!pending || pending.humanId !== socket.id || !cleanText) return;
+
+    pendingScreeningReplies.delete(roomId);
+    pending.resolve(cleanText);
+  });
   socket.on('accept_chat', ({ roomId }) => {
     const room = rooms[roomId];
     if (!room) return;
@@ -632,6 +758,14 @@ CRITICAL RULES:
   socket.on('disconnect', () => {
     console.log('❌ 사용자 접속 종료:', socket.id);
     waitingQueue = waitingQueue.filter(u => u.id !== socket.id);
+
+    if (socket.roomId) {
+      const pending = pendingScreeningReplies.get(socket.roomId);
+      if (pending) {
+        pendingScreeningReplies.delete(socket.roomId);
+        pending.resolve(null);
+      }
+    }
 
     if (socket.roomId && rooms[socket.roomId]) {
       io.to(socket.roomId).emit('chat_ended');
