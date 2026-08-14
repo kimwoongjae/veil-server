@@ -48,8 +48,9 @@ async function fetchFromAI(messages) {
 
 // --- 짧은 실시간 채팅용 고속 번역 호출기 ---
 const TRANSLATION_MODELS = [
-  '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
-  '@cf/meta/llama-3.1-8b-instruct-fp8-fast'
+  '@cf/google/gemma-4-26b-a4b-it',
+  '@cf/zai-org/glm-4.7-flash',
+  '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
 ];
 
 async function fetchTranslationFromAI(messages) {
@@ -793,4 +794,5 @@ const PORT = process.env.PORT || 10000;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 서버 실행 중: ${PORT}`);
 });
+
 
