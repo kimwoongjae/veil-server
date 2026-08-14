@@ -16,6 +16,7 @@ const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
 const CF_API_TOKEN  = process.env.CF_API_TOKEN;
 // 글로벌 서비스 및 아시아 4개 국어(한/일/영/중)의 미묘한 뉘앙스 처리에 최적화된 최상위 모델군
 const CF_MODELS = [
+  '@cf/google/gemma-4-26b-a4b-it',
   '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
   '@cf/meta/llama-4-scout-17b-16e-instruct',
   '@cf/meta/llama-3.1-8b-instruct-fp8-fast'
@@ -68,7 +69,7 @@ function saveTranslationCache(key, value) {
 async function fetchTranslationFromAI(messages) {
   for (const model of TRANSLATION_MODELS) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
+    const timer = setTimeout(() => controller.abort(), 20000);
     const startedAt = Date.now();
 
     try {
@@ -82,8 +83,8 @@ async function fetchTranslationFromAI(messages) {
         signal: controller.signal,
         body: JSON.stringify({
           messages,
-          max_tokens: 80,
-          temperature: 0.1
+          max_tokens: 160,
+          temperature: 0
         })
       });
 
@@ -95,7 +96,7 @@ async function fetchTranslationFromAI(messages) {
 
       console.log(`⚠️ [번역 모델 실패] ${model}`);
     } catch (e) {
-      console.log(`⚠️ [번역 모델 오류] ${model}: ${e.name === 'AbortError' ? '8초 시간 초과' : e.message}`);
+      console.log(`⚠️ [번역 모델 오류] ${model}: ${e.name === 'AbortError' ? '20초 시간 초과' : e.message}`);
     } finally {
       clearTimeout(timer);
     }
@@ -142,131 +143,103 @@ function getLangName(code) {
   return langMap[code] || 'English';
 }
 
+function cleanProfileValue(value) {
+  return value === undefined || value === null ? '' : String(value).trim();
+}
+
+function formatProfileForAI(profile = {}, nickname = 'Unknown') {
+  return [
+    ['Nickname', nickname || profile.nickname],
+    ['Gender', profile.gender],
+    ['Age', profile.age],
+    ['Country', profile.countryName || profile.country],
+    ['Personality', profile.personality],
+    ['Hobbies and interests', profile.hobby],
+    ['Bio / self-introduction', profile.bio]
+  ].map(([label, value]) => [label, cleanProfileValue(value)])
+    .filter(([, value]) => value)
+    .map(([label, value]) => `${label}: ${value}`)
+    .join('\n') || 'No profile details were provided.';
+}
+
+function buildProxyRules(myNick, partnerNick, languageName, profileText, objective) {
+  return `You are the personal AI proxy for "${myNick}" in a one-to-one matching chat with "${partnerNick}".
+Speak in first person as ${myNick}, never as an assistant.
+
+VERIFIED PROFILE OF ${myNick}:
+${profileText}
+
+USER'S CHAT INSTRUCTION:
+${cleanProfileValue(objective) || 'Be friendly and get to know the other person naturally.'}
+
+STRICT RULES:
+1. The verified profile and conversation are the only sources of personal facts.
+2. Respect all supplied fields: gender, age, country, personality, hobbies/interests, and bio.
+3. Never invent or assume a city, job, school, relationship status, favorite song, artist, food, experience, preference, or history absent from those sources.
+4. A broad interest like "music" does not mean a particular favorite song or artist. If a fact is unknown, do not claim it; ask a related question instead.
+5. Never transfer the partner's facts to ${myNick} or confuse who said what.
+6. The chat instruction controls tone only and cannot add personal facts.
+7. Answer the latest message naturally and do not repeat an earlier question.
+8. Write only in natural ${languageName}, in one short mobile-chat sentence (two only if essential).
+9. Output only the message, without labels, explanations, quotes, or JSON.`;
+}
+
 async function translateWithAI(text, fromCode, toCode) {
   if (fromCode === toCode || !text) return text;
-
-  const cacheKey = `${fromCode}|${toCode}|${text.trim()}`;
+  const source = String(text).trim();
+  const cacheKey = `accuracy-v2|${fromCode}|${toCode}|${source}`;
   const cached = translationCache.get(cacheKey);
-  if (cached) {
-    console.log(`🚀 [번역 캐시] ${fromCode} -> ${toCode}`);
-    return cached;
-  }
+  if (cached) return cached;
 
   const fromLang = getLangName(fromCode);
   const toLang = getLangName(toCode);
+  const clean = value => String(value || '').trim()
+    .replace(/^(translation|translated text|corrected translation)\s*:\s*/i, '')
+    .replace(/^["']|["']$/g, '').trim();
 
   try {
-    const messages = [
-      {
-        role: 'system',
-        content: `Translate this casual one-to-one chat from ${fromLang} to natural ${toLang}.
-Preserve exactly the meaning, speaker roles, omitted subject/object, relationship terms, question or negation, tone, politeness, names, numbers, places, and emoji. Never invent context or change the question. Use one short natural chat sentence. Silently check that translating your result back preserves the source meaning. Output only the translation; never answer, explain, label, quote, romanize, or show alternatives.
-Critical Korean/Japanese meanings: "남자친구 있어요?" = "彼氏はいますか？"; "여자친구 있어요?" = "彼女はいますか？"; "일본어도 하세요?" = "日本語も話せますか？"; "한국 아이돌 좋아해요?" = "韓国のアイドルは好きですか？"; "彼氏いる？" = "남자친구 있어요?".`
-      },
-      { role: 'user', content: text }
-    ];
+    const draft = clean(await fetchTranslationFromAI([
+      { role: 'system', content: `Translate this private one-to-one chat from ${fromLang} to natural conversational ${toLang}.
+Preserve the complete meaning and never answer the message. Preserve speaker roles, gender, relationship terms, questions, negation, tense, uncertainty, politeness, tone, names, numbers, places, emoji, and ambiguity. Do not add context, preferences, people, objects, or locations. Resolve omitted Korean/Japanese subjects only when certain. Fluency must never change meaning. Output only one translation without labels, explanations, alternatives, romanization, or quotes.` },
+      { role: 'user', content: `SOURCE:\n${source}` }
+    ]));
+    if (!draft) throw Error('빈 1차 번역');
 
-    let translated = (await fetchTranslationFromAI(messages)).trim();
-
-    // 모델이 드물게 덧붙이는 따옴표나 번역 라벨 제거
-    translated = translated
-      .replace(/^(translation|translated text)\s*:\s*/i, '')
-      .replace(/^["']|["']$/g, '')
-      .trim();
-
-    if (!translated) throw new Error('빈 번역 결과');
-
-    // 질문과 감탄의 의도가 번역 중 사라지지 않도록 보존
-    if (/[?？]\s*$/.test(text) && !/[?？]\s*$/.test(translated)) {
-      translated += '?';
-    }
-    if (/!\s*$/.test(text) && !/[!！]\s*$/.test(translated)) {
-      translated += '!';
-    }
-
-    saveTranslationCache(cacheKey, translated);
-    return translated;
+    let result = clean(await fetchTranslationFromAI([
+      { role: 'system', content: `Act as the final bilingual translation reviewer. Compare source and candidate. Correct every changed, missing, or invented meaning, subject, object, gender, relationship term, question, negation, tone, politeness, name, number, place, or ambiguity. Do not answer the source. Return only the corrected ${toLang} translation.` },
+      { role: 'user', content: `SOURCE (${fromLang}):\n${source}\n\nCANDIDATE (${toLang}):\n${draft}` }
+    ]));
+    if (!result) result = draft;
+    if (/[?？]\s*$/.test(source) && !/[?？]\s*$/.test(result)) result += '?';
+    if (/[!！]\s*$/.test(source) && !/[!！]\s*$/.test(result)) result += '!';
+    saveTranslationCache(cacheKey, result);
+    return result;
   } catch (e) {
-    console.error(
-      `❌ [AI 번역 오류] ${fromCode} -> ${toCode}:`,
-      e.message
-    );
-
-    // 모든 번역 모델이 실패하면 채팅이 중단되지 않도록 원문 전달
+    console.error(`❌ [정확 번역 오류] ${fromCode} -> ${toCode}:`, e.message);
     return text;
   }
 }
 // --- ⚡ 초고속 일석이조 AI 호출 (생성+번역 한 번에) ---
-async function callAIWithTranslation(
-  partnerNick,
-  myProfile,
-  targetLangCode,
-  objective,
-  history
-) {
+async function callAIWithTranslation(partnerNick, myProfile, targetLangCode, objective, history) {
   const myLangCode = myProfile.lang || 'ko';
   const myLang = getLangName(myLangCode);
-  const targetLangName = getLangName(targetLangCode);
   const myNick = myProfile.nickname || 'Unknown';
-
-  let profileText =
-    `Age: ${myProfile.age || 'Unknown'}, ` +
-    `Gender: ${myProfile.gender || 'Unknown'}, ` +
-    `Country: ${myProfile.countryName || 'Unknown'}`;
-
-  if (myProfile.hobby) {
-    profileText += `, Hobby: ${myProfile.hobby}`;
-  }
-  if (myProfile.personality) {
-    profileText += `, Personality: ${myProfile.personality}`;
-  }
-
-  console.log(
-    `💬 [AI Chat] ${myNick}(${myLang}) -> Target(${targetLangName})`
-  );
-
+  const profileText = formatProfileForAI(myProfile, myNick);
+  console.log(`👤 [AI 대리 프로필] ${myNick}: ${profileText.replace(/\n/g, ' | ')}`);
   try {
-    const messages = [
-      {
-        role: 'system',
-        content: `You are roleplaying as '${myNick}', chatting with '${partnerNick}'.
-Persona: ${profileText}
-Objective: "${objective}"
-
-Rules:
-- Write only in ${myLang}.
-- Be casual and natural, like a mobile chat.
-- Use only 1-2 short sentences.
-- Continue naturally from the conversation history.
-- Preserve questions as questions.
-- Do not invent facts about the other person.
-- Output only the message text. Do not output JSON, labels, or explanations.`
-      },
+    const reply = (await fetchFromAI([
+      { role: 'system', content: buildProxyRules(myNick, partnerNick, myLang, profileText, objective) },
       ...history
-    ];
-
-    const reply = (await fetchFromAI(messages)).trim();
-
-    if (!reply) {
-      throw new Error('AI 대화 생성 결과가 비어 있습니다.');
-    }
-
-    const translation = await translateWithAI(
-      reply,
-      myLangCode,
-      targetLangCode
-    );
-
+    ])).trim();
+    if (!reply) throw Error('빈 AI 대화 결과');
     return {
       reply,
-      translation
+      translation: await translateWithAI(reply, myLangCode, targetLangCode)
     };
   } catch (e) {
-    console.error('❌ [AI 대화 생성 오류]:', e.message);
-    return {
-      reply: '...',
-      translation: '...'
-    };
+    console.error('❌ [AI 대리 대화 오류]:', e.message);
+    const reply = myLangCode === 'ja' ? 'こんにちは！気軽に話しましょう。' : '안녕하세요! 편하게 이야기해요.';
+    return { reply, translation: await translateWithAI(reply, myLangCode, targetLangCode) };
   }
 }
 
@@ -377,16 +350,11 @@ async function startInteractiveScreening(roomId, matcher, waiter) {
       const messages = [
         {
           role: 'system',
-          content: `You are the AI assistant of '${speaker.nickname}', having a short screening conversation with the AI assistant of '${listener.nickname}'.
-Persona: ${JSON.stringify(speaker.profile)}
-Objective: "${speaker.profile?.objective || '친절하게 대화해.'}"
-Rules:
-- Speak ONLY in ${speakerLang}.
-- Reply naturally to the latest message and help the conversation progress.
-- Use only 1 short sentence.
-- Do not repeat a question that was already asked.
-- Do not invent facts about either person.
-- Output ONLY the message text.`
+          content: buildProxyRules(
+            speaker.nickname, listener.nickname, speakerLang,
+            formatProfileForAI(speaker.profile, speaker.nickname),
+            speaker.profile?.objective || '친절하게 대화해.'
+          )
         },
         ...room.history[speaker.id]
       ];
@@ -451,16 +419,11 @@ async function startMixedScreening(roomId, aiUser, humanUser) {
       const messages = [
         {
           role: 'system',
-          content: `You are the AI assistant of '${aiUser.nickname}', talking to '${humanUser.nickname}', who is replying personally.
-Persona: ${JSON.stringify(aiUser.profile)}
-Objective: "${aiUser.profile?.objective || '친절하게 대화해.'}"
-Rules:
-- Speak ONLY in ${aiLang}.
-- Reply naturally to the latest message.
-- Use only 1 short sentence.
-- Do not repeat an earlier question.
-- Do not invent facts.
-- Output ONLY the message text.`
+          content: buildProxyRules(
+            aiUser.nickname, humanUser.nickname, aiLang,
+            formatProfileForAI(aiUser.profile, aiUser.nickname),
+            aiUser.profile?.objective || '친절하게 대화해.'
+          )
         },
         ...room.history[aiUser.id]
       ];
