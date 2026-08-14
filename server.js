@@ -345,6 +345,31 @@ Rules:
 let waitingQueue = []; 
 const rooms = {};
 
+// 두 사용자를 즉시 룸에 연결하고 AI 자동 스크리닝 시작
+function startMatchedRoom(userA, userB) {
+  if (!userA || !userB) return;
+
+  const roomId = `room_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+  rooms[roomId] = {
+    users: [userA, userB],
+    history: { [userA.id]: [], [userB.id]: [] },
+    realHistory: [],
+    accepted: { [userA.id]: false, [userB.id]: false }
+  };
+
+  [userA, userB].forEach(user => {
+    user.join(roomId);
+    user.roomId = roomId;
+    delete user.pendingPartner;
+  });
+
+  io.to(roomId).emit('matched', { roomId });
+
+  // 같은 역할끼리 매칭된 경우에도 두 사용자를 확실하게 구분
+  const matcher = userA.role === 'matcher' ? userA : userB;
+  const waiter = matcher.id === userA.id ? userB : userA;
+  startInteractiveScreening(roomId, matcher, waiter);
+}
 // --- 매칭 로직 (전역 관리) ---
 function tryMatch() {
   // 1. 최우선: Matcher + Waiter 조합 찾기
@@ -378,13 +403,19 @@ function tryMatch() {
     matcher.pendingPartner = waiter;
     waiter.pendingPartner = matcher;
 
-    // 파트너 정보 교환 및 수락 대기 상태 진입
-    waiter.emit('incoming_match', {
-      fromId: matcher.id,
-      fromNickname: matcher.nickname,
-      fromProfile: matcher.profile
-    });
-    matcher.emit('match_waiting', { partnerNickname: waiter.nickname });
+    // 상대방 프로필에서 자동 수락을 선택했다면 확인 창 없이 바로 시작
+    const requiresApproval = waiter.profile?.requireMatchApproval !== false;
+    if (!requiresApproval) {
+      console.log(`⚡ [Auto Accept] ${waiter.nickname} skipped the approval dialog.`);
+      startMatchedRoom(matcher, waiter);
+    } else {
+      waiter.emit('incoming_match', {
+        fromId: matcher.id,
+        fromNickname: matcher.nickname,
+        fromProfile: matcher.profile
+      });
+      matcher.emit('match_waiting', { partnerNickname: waiter.nickname });
+    }
   }
 }
 
@@ -414,25 +445,7 @@ io.on('connection', (socket) => {
     if (!partner) return;
 
     if (data.accepted) {
-      const roomId = `room_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-      rooms[roomId] = {
-        users: [partner, socket],
-        history: { [partner.id]: [], [socket.id]: [] },
-        realHistory: [],
-        accepted: { [partner.id]: false, [socket.id]: false }
-      };
-
-      [partner, socket].forEach(s => {
-        s.join(roomId);
-        s.roomId = roomId;
-        delete s.pendingPartner;
-      });
-
-      io.to(roomId).emit('matched', { roomId });
-      // 항상 matcher가 먼저 시작하므로 역할을 구분하여 전달
-      const matcher = partner.role === 'matcher' ? partner : socket;
-      const waiter = partner.role === 'waiter' ? partner : socket;
-      startInteractiveScreening(roomId, matcher, waiter);
+      startMatchedRoom(partner, socket);
     } else {
       partner.emit('match_declined');
       delete socket.pendingPartner;
