@@ -16,14 +16,17 @@ const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
 const CF_API_TOKEN  = process.env.CF_API_TOKEN;
 // 글로벌 서비스 및 아시아 4개 국어(한/일/영/중)의 미묘한 뉘앙스 처리에 최적화된 최상위 모델군
 const CF_MODELS = [
-  '@cf/google/gemma-4-26b-a4b-it',
-  '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+  // 대화 생성은 짧은 응답에 최적화된 고속 모델을 우선 사용한다.
+  '@cf/meta/llama-3.1-8b-instruct-fp8-fast',
   '@cf/meta/llama-4-scout-17b-16e-instruct',
-  '@cf/meta/llama-3.1-8b-instruct-fp8-fast'
+  '@cf/google/gemma-4-26b-a4b-it',
+  '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
 ];
 // --- 공통 AI API 호출기 ---
 async function fetchFromAI(messages) {
   for (const model of CF_MODELS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
     try {
       const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${model}`;
       const res = await fetch(url, {
@@ -32,8 +35,8 @@ async function fetchFromAI(messages) {
           'Authorization': `Bearer ${CF_API_TOKEN}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ messages })
-        // 콜드 스타트(첫 구동) 시 10초 이상 걸릴 수 있으므로 8초 타임아웃 삭제
+        signal: controller.signal,
+        body: JSON.stringify({ messages, max_tokens: 120, temperature: 0.3 })
       });
       
       const data = await res.json();
@@ -41,7 +44,9 @@ async function fetchFromAI(messages) {
         return data.result.response;
       }
     } catch (e) {
-      console.log(`⚠️ [AI 에러] 모델: ${model}, 사유: ${e.message}`);
+      console.log(`⚠️ [AI 에러] 모델: ${model}, 사유: ${e.name === 'AbortError' ? '12초 시간 초과' : e.message}`);
+    } finally {
+      clearTimeout(timer);
     }
   }
   throw new Error("모든 AI 모델의 응답이 실패했습니다.");
@@ -69,7 +74,7 @@ function saveTranslationCache(key, value) {
 async function fetchTranslationFromAI(messages) {
   for (const model of TRANSLATION_MODELS) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 20000);
+    const timer = setTimeout(() => controller.abort(), 12000);
     const startedAt = Date.now();
 
     try {
@@ -83,7 +88,7 @@ async function fetchTranslationFromAI(messages) {
         signal: controller.signal,
         body: JSON.stringify({
           messages,
-          max_tokens: 160,
+          max_tokens: 100,
           temperature: 0
         })
       });
@@ -96,7 +101,7 @@ async function fetchTranslationFromAI(messages) {
 
       console.log(`⚠️ [번역 모델 실패] ${model}`);
     } catch (e) {
-      console.log(`⚠️ [번역 모델 오류] ${model}: ${e.name === 'AbortError' ? '20초 시간 초과' : e.message}`);
+      console.log(`⚠️ [번역 모델 오류] ${model}: ${e.name === 'AbortError' ? '12초 시간 초과' : e.message}`);
     } finally {
       clearTimeout(timer);
     }
@@ -187,7 +192,7 @@ STRICT RULES:
 async function translateWithAI(text, fromCode, toCode) {
   if (fromCode === toCode || !text) return text;
   const source = String(text).trim();
-  const cacheKey = `accuracy-v2|${fromCode}|${toCode}|${source}`;
+  const cacheKey = `balanced-v3|${fromCode}|${toCode}|${source}`;
   const cached = translationCache.get(cacheKey);
   if (cached) return cached;
 
@@ -198,18 +203,12 @@ async function translateWithAI(text, fromCode, toCode) {
     .replace(/^["']|["']$/g, '').trim();
 
   try {
-    const draft = clean(await fetchTranslationFromAI([
+    let result = clean(await fetchTranslationFromAI([
       { role: 'system', content: `Translate this private one-to-one chat from ${fromLang} to natural conversational ${toLang}.
 Preserve the complete meaning and never answer the message. Preserve speaker roles, gender, relationship terms, questions, negation, tense, uncertainty, politeness, tone, names, numbers, places, emoji, and ambiguity. Do not add context, preferences, people, objects, or locations. Resolve omitted Korean/Japanese subjects only when certain. Fluency must never change meaning. Output only one translation without labels, explanations, alternatives, romanization, or quotes.` },
       { role: 'user', content: `SOURCE:\n${source}` }
     ]));
-    if (!draft) throw Error('빈 1차 번역');
-
-    let result = clean(await fetchTranslationFromAI([
-      { role: 'system', content: `Act as the final bilingual translation reviewer. Compare source and candidate. Correct every changed, missing, or invented meaning, subject, object, gender, relationship term, question, negation, tone, politeness, name, number, place, or ambiguity. Do not answer the source. Return only the corrected ${toLang} translation.` },
-      { role: 'user', content: `SOURCE (${fromLang}):\n${source}\n\nCANDIDATE (${toLang}):\n${draft}` }
-    ]));
-    if (!result) result = draft;
+    if (!result) throw Error('빈 번역');
     if (/[?？]\s*$/.test(source) && !/[?？]\s*$/.test(result)) result += '?';
     if (/[!！]\s*$/.test(source) && !/[!！]\s*$/.test(result)) result += '!';
     saveTranslationCache(cacheKey, result);
@@ -332,8 +331,8 @@ async function startInteractiveScreening(roomId, matcher, waiter) {
 
   console.log(`🍿 [AI 자동 스크리닝] ${matcher.nickname} AI <-> ${waiter.nickname} AI`);
 
-  // 기존 3회 왕복과 같은 분량: 양쪽 AI가 번갈아 총 6개 메시지 생성
-  const TOTAL_MESSAGES = 6;
+  // 대기 시간을 줄이면서 성향을 확인할 수 있도록 양쪽 AI가 두 번씩 대화
+  const TOTAL_MESSAGES = 4;
   let speaker = matcher;
   let listener = waiter;
 
