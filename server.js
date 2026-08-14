@@ -9,7 +9,13 @@ app.use(cors());
 
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] }
+  cors: { origin: '*', methods: ['GET', 'POST'] },
+  pingInterval: 25000,
+  pingTimeout: 60000,
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 2 * 60 * 1000,
+    skipMiddlewares: true
+  }
 });
 
 const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
@@ -489,6 +495,8 @@ async function startMixedScreening(roomId, aiUser, humanUser) {
 let waitingQueue = []; 
 const rooms = {};
 const pendingScreeningReplies = new Map();
+const disconnectCleanupTimers = new Map();
+const RECONNECT_GRACE_MS = 2 * 60 * 1000;
 
 // 두 사용자를 즉시 룸에 연결하고 AI 자동 스크리닝 시작
 function startMatchedRoom(userA, userB) {
@@ -579,6 +587,32 @@ function tryMatch() {
 
 io.on('connection', (socket) => {
   console.log('✅ 새 사용자 접속:', socket.id);
+
+  // 휴대폰이 잠자기/백그라운드 상태에서 돌아오면 기존 방과 사용자 정보를 복구한다.
+  if (socket.recovered) {
+    const cleanupTimer = disconnectCleanupTimers.get(socket.id);
+    if (cleanupTimer) {
+      clearTimeout(cleanupTimer);
+      disconnectCleanupTimers.delete(socket.id);
+    }
+
+    for (const [roomId, room] of Object.entries(rooms)) {
+      const userIndex = room.users.findIndex(user => user.id === socket.id);
+      if (userIndex === -1) continue;
+
+      const previousSocket = room.users[userIndex];
+      socket.nickname = previousSocket.nickname;
+      socket.profile = previousSocket.profile;
+      socket.role = previousSocket.role;
+      socket.roomId = roomId;
+      room.users[userIndex] = socket;
+      socket.join(roomId);
+      socket.emit('session_resumed', { roomId, screeningMode: room.screeningMode });
+      socket.to(roomId).emit('partner_reconnected');
+      console.log(`🔄 [Session Recovered] ${socket.nickname || socket.id} -> ${roomId}`);
+      break;
+    }
+  }
 
   // --- 1. 매칭 대기열 합류 (Matcher vs Waiter 분리) ---
   socket.on('join_queue', (data) => {
@@ -732,22 +766,37 @@ CRITICAL RULES:
     delete rooms[roomId];
   });
 
-  socket.on('disconnect', () => {
-    console.log('❌ 사용자 접속 종료:', socket.id);
+  socket.on('disconnect', (reason) => {
+    console.log('⚠️ 사용자 연결 일시 중단:', socket.id, reason);
     waitingQueue = waitingQueue.filter(u => u.id !== socket.id);
 
-    if (socket.roomId) {
-      const pending = pendingScreeningReplies.get(socket.roomId);
+    const roomId = socket.roomId;
+    if (!roomId || !rooms[roomId]) return;
+
+    socket.to(roomId).emit('partner_reconnecting', { graceSeconds: RECONNECT_GRACE_MS / 1000 });
+
+    const previousTimer = disconnectCleanupTimers.get(socket.id);
+    if (previousTimer) clearTimeout(previousTimer);
+
+    const cleanupTimer = setTimeout(() => {
+      disconnectCleanupTimers.delete(socket.id);
+
+      // Connection State Recovery가 성공했다면 같은 socket.id가 다시 활성화된다.
+      if (io.sockets.sockets.has(socket.id)) return;
+      if (!rooms[roomId]) return;
+
+      const pending = pendingScreeningReplies.get(roomId);
       if (pending) {
-        pendingScreeningReplies.delete(socket.roomId);
+        pendingScreeningReplies.delete(roomId);
         pending.resolve(null);
       }
-    }
 
-    if (socket.roomId && rooms[socket.roomId]) {
-      io.to(socket.roomId).emit('chat_ended');
-      delete rooms[socket.roomId];
-    }
+      io.to(roomId).emit('chat_ended');
+      delete rooms[roomId];
+      console.log(`❌ [Reconnect Timeout] ${roomId} 종료`);
+    }, RECONNECT_GRACE_MS);
+
+    disconnectCleanupTimers.set(socket.id, cleanupTimer);
   });
 });
 
@@ -755,6 +804,7 @@ const PORT = process.env.PORT || 10000;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 서버 실행 중: ${PORT}`);
 });
+
 
 
 
