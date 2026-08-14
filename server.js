@@ -16,13 +16,10 @@ const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
 const CF_API_TOKEN  = process.env.CF_API_TOKEN;
 // 글로벌 서비스 및 아시아 4개 국어(한/일/영/중)의 미묘한 뉘앙스 처리에 최적화된 최상위 모델군
 const CF_MODELS = [
-  '@cf/meta/llama-3.1-8b-instruct',          // 1순위: 초고속 응답 (실시간 채팅/번역 최적)
-  '@cf/meta/llama-3.1-70b-instruct',         // 2순위: 고정밀 분석/리포트용
-  '@cf/google/gemma-4-26b-a4b-it',           // 3순위
-  '@cf/meta/llama-4-scout-17b-16e-instruct', 
-  '@cf/qwen/qwen1.5-7b-chat-awq'
+  '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+  '@cf/meta/llama-4-scout-17b-16e-instruct',
+  '@cf/meta/llama-3.1-8b-instruct-fp8-fast'
 ];
-
 // --- 공통 AI API 호출기 ---
 async function fetchFromAI(messages) {
   for (const model of CF_MODELS) {
@@ -90,88 +87,126 @@ function getLangName(code) {
 
 async function translateWithAI(text, fromCode, toCode) {
   if (fromCode === toCode || !text) return text;
-  
-  const fromLang = getLangName(fromCode);
-  const toLang = getLangName(toCode);
-  
-  console.log(`🌐 [Global Translation] ${fromLang} -> ${toLang}`);
-  
+
+  const translationModel = '@cf/meta/m2m100-1.2b';
+  const targetCode = toCode === 'zh-TW' ? 'zh' : toCode;
+
   try {
-    const messages = [
-      { role: 'system', content: `You are a professional, high-accuracy translator. 
-Translate the user's message from ${fromLang} to ${toLang} faithfully.
+    const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${translationModel}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${CF_API_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        text,
+        source_lang: fromCode,
+        target_lang: targetCode
+      })
+    });
 
-EXAMPLES:
-- "안녕" -> "こんにちは" (to Japanese) / "Hi" (to English)
-- "반가워" -> "はじめまして" (to Japanese) / "Nice to meet you" (to English)
-- "뭐해?" -> "何してるの？" (to Japanese) / "What are you doing?" (to English)
+    const data = await res.json();
 
-CRITICAL RULES:
-1. NO CREATIVITY: Do NOT hallucinate context. If the source is just a greeting, use a standard greeting.
-2. NO MIXING: Use ONLY the ${toLang} script. Never use slang or script from other languages (e.g. No "ㅎㅇ" in Japanese).
-3. STYLE: Keep it casual for a chat, but maintain the exact meaning.
-4. ONLY TRANSLATION: Output only the translated text.` },
-      { role: 'user', content: text }
-    ];
-
-    let result = await fetchFromAI(messages);
-    result = result.trim();
-    
-    if (result.startsWith('"') && result.endsWith('"')) {
-      result = result.slice(1, -1);
+    if (!res.ok || !data.success || !data.result?.translated_text) {
+      throw new Error(
+        `Cloudflare Translation ${res.status}: ${JSON.stringify(data.errors || data)}`
+      );
     }
-    return result;
+
+    let translated = data.result.translated_text.trim();
+
+    // 질문과 감탄의 의도가 번역 중 사라지지 않도록 보존
+    if (/[?？]\s*$/.test(text) && !/[?？]\s*$/.test(translated)) {
+      translated += '?';
+    }
+    if (/!\s*$/.test(text) && !/[!！]\s*$/.test(translated)) {
+      translated += '!';
+    }
+
+    return translated;
   } catch (e) {
-    console.log("❌ [번역 에러]:", e.message);
+    console.error(
+      `❌ [번역 전용 모델 오류] ${fromCode} -> ${toCode}:`,
+      e.message
+    );
+
+    // 번역 모델이 지원하지 않는 언어일 때 원문을 그대로 전달
     return text;
   }
 }
 
 // --- ⚡ 초고속 일석이조 AI 호출 (생성+번역 한 번에) ---
-async function callAIWithTranslation(partnerNick, myProfile, targetLangName, objective, history) {
+async function callAIWithTranslation(
+  partnerNick,
+  myProfile,
+  targetLangCode,
+  objective,
+  history
+) {
   const myLangCode = myProfile.lang || 'ko';
   const myLang = getLangName(myLangCode);
+  const targetLangName = getLangName(targetLangCode);
   const myNick = myProfile.nickname || 'Unknown';
-  
-  let profileText = `Age: ${myProfile.age || 'Unknown'}, Gender: ${myProfile.gender || 'Unknown'}, Country: ${myProfile.countryName || 'Unknown'}`;
-  if (myProfile.hobby) profileText += `, Hobby: ${myProfile.hobby}`;
-  if (myProfile.personality) profileText += `, Personality: ${myProfile.personality}`;
 
-  console.log(`⚡ [Speed Gen] ${myNick}(${myLang}) -> Target(${targetLangName})`);
-  
+  let profileText =
+    `Age: ${myProfile.age || 'Unknown'}, ` +
+    `Gender: ${myProfile.gender || 'Unknown'}, ` +
+    `Country: ${myProfile.countryName || 'Unknown'}`;
+
+  if (myProfile.hobby) {
+    profileText += `, Hobby: ${myProfile.hobby}`;
+  }
+  if (myProfile.personality) {
+    profileText += `, Personality: ${myProfile.personality}`;
+  }
+
+  console.log(
+    `💬 [AI Chat] ${myNick}(${myLang}) -> Target(${targetLangName})`
+  );
+
   try {
     const messages = [
-      { 
-        role: 'system', 
+      {
+        role: 'system',
         content: `You are roleplaying as '${myNick}', chatting with '${partnerNick}'.
 Persona: ${profileText}
 Objective: "${objective}"
 
-CRITICAL: You must provide your response in a strict JSON format with exactly two fields:
-1. "reply": Your casual response in native ${myLang}.
-2. "translation": The exact translation of that response into ${targetLangName}.
-
 Rules:
-- Be casual, like a mobile text (1-2 sentences).
-- Use natural expressions (e.g. Korean casual "~해", Japanese casual "〜だよ").
-- Output ONLY the JSON string. No explanations.` 
+- Write only in ${myLang}.
+- Be casual and natural, like a mobile chat.
+- Use only 1-2 short sentences.
+- Continue naturally from the conversation history.
+- Preserve questions as questions.
+- Do not invent facts about the other person.
+- Output only the message text. Do not output JSON, labels, or explanations.`
       },
       ...history
     ];
 
-    let result = await fetchFromAI(messages);
-    if (!result) return { reply: "...", translation: "..." };
+    const reply = (await fetchFromAI(messages)).trim();
 
-    // JSON 파싱 (경계 부호 등 제거)
-    const jsonStr = result.substring(result.indexOf('{'), result.lastIndexOf('}') + 1);
-    const parsed = JSON.parse(jsonStr);
+    if (!reply) {
+      throw new Error('AI 대화 생성 결과가 비어 있습니다.');
+    }
+
+    const translation = await translateWithAI(
+      reply,
+      myLangCode,
+      targetLangCode
+    );
+
     return {
-      reply: parsed.reply.trim(),
-      translation: parsed.translation.trim()
+      reply,
+      translation
     };
   } catch (e) {
-    console.log("❌ [AI Speed Gen 에러]:", e.message);
-    return { reply: "...", translation: "..." };
+    console.error('❌ [AI 대화 생성 오류]:', e.message);
+    return {
+      reply: '...',
+      translation: '...'
+    };
   }
 }
 
@@ -260,7 +295,7 @@ Rules:
       aiData = await callAIWithTranslation(
         waiter.nickname, 
         matcher.profile, 
-        getLangName(waiter.profile.lang),
+        waiter.profile.lang,
         matcher.profile?.objective || "친절하게 대화해.",
         room.history[matcher.id]
       );
@@ -487,15 +522,17 @@ io.on('connection', (socket) => {
     // 3. 비동기 번역 시작 (기다리지 않음)
     if (isDifferentLang) {
         translateWithAI(text, socket.profile.lang, partner.profile.lang).then(translatedText => {
-            // 번역이 완료되면 해당 메시지만 업데이트
-            partner.emit('chat_update', {
+            // 번역이 완료되면 발신자와 수신자 모두에게 업데이트 전송
+            const updateData = {
                 id: msgId,
                 text: translatedText,
                 original: text
-            });
+            };
+            
+            partner.emit('chat_update', updateData);
+            socket.emit('chat_update', updateData); // 내가 보낸 메시지도 번역본 확인 가능
         }).catch(err => {
             console.error("Translation error:", err);
-            // 에러 시 업데이트 없음 (원본 유지)
         });
     }
   });
