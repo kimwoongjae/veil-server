@@ -88,33 +88,35 @@ function getLangName(code) {
 async function translateWithAI(text, fromCode, toCode) {
   if (fromCode === toCode || !text) return text;
 
-  const translationModel = '@cf/meta/m2m100-1.2b';
-  const targetCode = toCode === 'zh-TW' ? 'zh' : toCode;
+  const fromLang = getLangName(fromCode);
+  const toLang = getLangName(toCode);
 
   try {
-    const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${translationModel}`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${CF_API_TOKEN}`,
-        'Content-Type': 'application/json'
+    const messages = [
+      {
+        role: 'system',
+        content: `You are a high-accuracy translator for a casual one-to-one chat app.
+Translate the user's message from ${fromLang} to ${toLang}.
+
+RULES:
+1. Preserve the exact meaning, question intent, tone, politeness, names, numbers, and emoji.
+2. Use natural conversational ${toLang}; do not add, remove, answer, or explain anything.
+3. Resolve omitted subjects and objects from the words in the source, not by guessing a new topic.
+4. Distinguish nationality/person words from language words. For example, Korean "일본어도 하세요?" means "Can you speak Japanese too?", so in Japanese translate it as "日本語も話せますか？", never "日本人でも？".
+5. Output only the translation, with no quotation marks, labels, notes, or alternatives.`
       },
-      body: JSON.stringify({
-        text,
-        source_lang: fromCode,
-        target_lang: targetCode
-      })
-    });
+      { role: 'user', content: text }
+    ];
 
-    const data = await res.json();
+    let translated = (await fetchFromAI(messages)).trim();
 
-    if (!res.ok || !data.success || !data.result?.translated_text) {
-      throw new Error(
-        `Cloudflare Translation ${res.status}: ${JSON.stringify(data.errors || data)}`
-      );
-    }
+    // 모델이 드물게 덧붙이는 따옴표나 번역 라벨 제거
+    translated = translated
+      .replace(/^(translation|translated text)\s*:\s*/i, '')
+      .replace(/^["']|["']$/g, '')
+      .trim();
 
-    let translated = data.result.translated_text.trim();
+    if (!translated) throw new Error('빈 번역 결과');
 
     // 질문과 감탄의 의도가 번역 중 사라지지 않도록 보존
     if (/[?？]\s*$/.test(text) && !/[?？]\s*$/.test(translated)) {
@@ -127,15 +129,14 @@ async function translateWithAI(text, fromCode, toCode) {
     return translated;
   } catch (e) {
     console.error(
-      `❌ [번역 전용 모델 오류] ${fromCode} -> ${toCode}:`,
+      `❌ [AI 번역 오류] ${fromCode} -> ${toCode}:`,
       e.message
     );
 
-    // 번역 모델이 지원하지 않는 언어일 때 원문을 그대로 전달
+    // 모든 번역 모델이 실패하면 채팅이 중단되지 않도록 원문 전달
     return text;
   }
 }
-
 // --- ⚡ 초고속 일석이조 AI 호출 (생성+번역 한 번에) ---
 async function callAIWithTranslation(
   partnerNick,
