@@ -46,6 +46,50 @@ async function fetchFromAI(messages) {
   throw new Error("모든 AI 모델의 응답이 실패했습니다.");
 }
 
+// --- 짧은 실시간 채팅용 고속 번역 호출기 ---
+const TRANSLATION_MODELS = [
+  '@cf/meta/llama-3.1-8b-instruct-fp8-fast',
+  '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
+];
+
+async function fetchTranslationFromAI(messages) {
+  for (const model of TRANSLATION_MODELS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    const startedAt = Date.now();
+
+    try {
+      const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${model}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${CF_API_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          messages,
+          max_tokens: 160,
+          temperature: 0.1
+        })
+      });
+
+      const data = await res.json();
+      if (data.success && data.result && data.result.response) {
+        console.log(`⚡ [번역 완료] ${model} / ${Date.now() - startedAt}ms`);
+        return data.result.response;
+      }
+
+      console.log(`⚠️ [번역 모델 실패] ${model}`);
+    } catch (e) {
+      console.log(`⚠️ [번역 모델 오류] ${model}: ${e.name === 'AbortError' ? '8초 시간 초과' : e.message}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  throw new Error('모든 번역 모델의 응답이 실패했습니다.');
+}
 // --- 언어 매핑 (전 세계 30개 이상의 언어 지원) ---
 const langMap = {
   'ko': 'Korean',
@@ -108,7 +152,7 @@ RULES:
       { role: 'user', content: text }
     ];
 
-    let translated = (await fetchFromAI(messages)).trim();
+    let translated = (await fetchTranslationFromAI(messages)).trim();
 
     // 모델이 드물게 덧붙이는 따옴표나 번역 라벨 제거
     translated = translated
