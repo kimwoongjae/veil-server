@@ -657,6 +657,34 @@ io.on('connection', (socket) => {
     tryMatch();
   });
 
+  // 매칭 화면에서 홈으로 이동하면 대기열과 진행 중인 매칭을 함께 정리
+  socket.on('cancel_matching', ({ roomId } = {}) => {
+    waitingQueue = waitingQueue.filter(user => user.id !== socket.id);
+    if (socket.data) delete socket.data.queueRegistration;
+
+    const pendingPartner = socket.pendingPartner;
+    if (pendingPartner) {
+      pendingPartner.emit('match_declined');
+      delete pendingPartner.pendingPartner;
+      delete socket.pendingPartner;
+    }
+
+    const activeRoomId = roomId || socket.roomId;
+    const activeRoom = activeRoomId ? rooms[activeRoomId] : null;
+    if (activeRoom) {
+      socket.to(activeRoomId).emit('chat_ended');
+      activeRoom.users.forEach(user => {
+        user.leave(activeRoomId);
+        delete user.roomId;
+      });
+      pendingScreeningReplies.delete(activeRoomId);
+      delete rooms[activeRoomId];
+    }
+
+    socket.emit('matching_cancelled');
+    console.log(`🏠 [Matching Cancelled] ${socket.nickname || socket.id}`);
+  });
+
   // --- 2. 매칭 수락/거절 ---
   socket.on('respond_match', (data) => {
     const partner = socket.pendingPartner;
