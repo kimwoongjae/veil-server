@@ -509,8 +509,10 @@ function startMatchedRoom(userA, userB) {
     realHistory: [],
     accepted: { [userA.id]: false, [userB.id]: false }
   };
+  const room = rooms[roomId];
 
   [userA, userB].forEach(user => {
+    if (user.data) delete user.data.queueRegistration;
     user.join(roomId);
     user.roomId = roomId;
     delete user.pendingPartner;
@@ -519,7 +521,7 @@ function startMatchedRoom(userA, userB) {
   const bothUseAI = userA.role === 'matcher' && userB.role === 'matcher';
   const mixedMode = userA.role !== userB.role;
   const screeningMode = bothUseAI ? 'ai-ai' : (mixedMode ? 'ai-human' : 'human-human');
-  rooms[roomId].screeningMode = screeningMode;
+  room.screeningMode = screeningMode;
   io.to(roomId).emit('matched', { roomId, screeningMode });
 
   if (bothUseAI) {
@@ -612,22 +614,46 @@ io.on('connection', (socket) => {
       console.log(`🔄 [Session Recovered] ${socket.nickname || socket.id} -> ${roomId}`);
       break;
     }
+
+    // 방이 아니라 매칭 대기 중 끊겼다면 복구된 등록 정보로 큐에 다시 넣는다.
+    if (!socket.roomId && socket.data.queueRegistration) {
+      const registration = socket.data.queueRegistration;
+      socket.nickname = registration.nickname;
+      socket.profile = registration.profile;
+      socket.role = registration.role;
+      socket.pendingPartner = null;
+      waitingQueue = waitingQueue.filter(user => user.id !== socket.id);
+      waitingQueue.push(socket);
+      socket.emit('waiting', { role: socket.role, resumed: true });
+      console.log(`🔄 [Queue Recovered] ${socket.role.toUpperCase()} | ${socket.nickname}`);
+      setImmediate(tryMatch);
+    }
   }
 
   // --- 1. 매칭 대기열 합류 (Matcher vs Waiter 분리) ---
-  socket.on('join_queue', (data) => {
+  socket.on('join_queue', (data = {}) => {
+    const role = data.role === 'matcher' ? 'matcher' : (data.role === 'waiter' ? 'waiter' : null);
+    if (!role || !data.nickname) {
+      socket.emit('queue_error', { message: 'Invalid queue registration' });
+      return;
+    }
+
     socket.nickname = data.nickname;
     socket.profile = data.profile || { lang: 'ko' };
-    socket.role = data.role; // 'matcher' 또는 'waiter'
-    socket.pendingPartner = null; // 초기화
+    socket.role = role;
+    socket.pendingPartner = null;
+    socket.data.queueRegistration = {
+      nickname: socket.nickname,
+      profile: socket.profile,
+      role: socket.role
+    };
     
     // 이미 큐에 있다면 제거 후 다시 삽입 (중복 방지)
     waitingQueue = waitingQueue.filter(u => u.id !== socket.id);
     waitingQueue.push(socket);
+    socket.emit('waiting', { role: socket.role });
     
     console.log(`⏳ [Queue Join] ${socket.role.toUpperCase()} | ${socket.nickname} | Total: ${waitingQueue.length}`);
-    
-    // 매칭 시도
     tryMatch();
   });
 
